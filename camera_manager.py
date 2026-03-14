@@ -4,6 +4,7 @@ Requires MVS SDK installed at /opt/MVS with Python bindings.
 """
 
 import sys
+import queue
 import threading
 import time
 import logging
@@ -18,9 +19,11 @@ sys.path.insert(0, MVS_SDK_PATH)
 
 from MvCameraControl_class import *
 
+from recording_manager import RecordingManager
+
 log = logging.getLogger("camera_manager")
 
-HB_MONO8 = 0x80080001
+HB_MONO8 = 0x81080001  # PixelType_Gvsp_HB_Mono8 from SDK PixelType_header.py
 MONO8 = 0x01080001
 
 
@@ -60,6 +63,7 @@ class CameraInstance:
 
         self._acq_thread = None
         self._stop_event = threading.Event()
+        self._record_queue: queue.Queue | None = None
 
         self._acq_fps = 0.0
         self._frame_count = 0
@@ -88,6 +92,22 @@ class CameraInstance:
 
         # Free-run mode
         self.cam.MV_CC_SetEnumValue("TriggerMode", MV_TRIGGER_MODE_OFF)
+
+        # Apply pixel format — attempt HB_Mono8 for higher throughput, fall back to Mono8
+        if self.use_hb:
+            ret = self.cam.MV_CC_SetEnumValue("PixelFormat", HB_MONO8)
+            if ret == MV_OK:
+                log.info("Camera %s: PixelFormat = HB_Mono8 (compressed, higher fps)", self.ip)
+            else:
+                log.warning("Camera %s: HB_Mono8 not supported (0x%08X) — using Mono8; "
+                            "max fps will be ~24 on 1GigE link", self.ip, ret)
+                self.cam.MV_CC_SetEnumValue("PixelFormat", MONO8)
+                self.use_hb = False
+        else:
+            self.cam.MV_CC_SetEnumValue("PixelFormat", MONO8)
+
+        # Disable software frame rate cap so camera runs at its natural sensor maximum
+        self.cam.MV_CC_SetBoolValue("AcquisitionFrameRateEnable", False)
 
         self.is_open = True
         log.info("Opened camera %s (%s)", self.ip, self.model)
@@ -225,6 +245,14 @@ class CameraInstance:
                     src = ctypes.cast(stOutFrame.pBufAddr, ctypes.POINTER(c_ubyte * (w * h))).contents
                     frame = np.frombuffer(src, dtype=np.uint8).reshape((h, w)).copy()
 
+                # Push to recording queue if recording is active
+                rq = self._record_queue
+                if rq is not None:
+                    try:
+                        rq.put_nowait(frame)
+                    except queue.Full:
+                        log.debug("Record queue full for %s — frame dropped", self.ip)
+
                 # JPEG encode for streaming
                 _, jpeg_buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
                 jpeg_bytes = jpeg_buf.tobytes()
@@ -329,6 +357,7 @@ class CameraManager:
     def __init__(self):
         MvCamera.MV_CC_Initialize()
         self._cameras = {}  # ip_str -> CameraInstance
+        self._recording_manager = RecordingManager()
         log.info("CameraManager initialized (SDK ready)")
 
     def discover(self):
@@ -381,7 +410,35 @@ class CameraManager:
     def list_cameras(self):
         return [cam.status() for cam in self._cameras.values()]
 
+    def start_recording(self, camera_ids=None) -> str:
+        grabbing = [ip for ip, cam in self._cameras.items() if cam.is_grabbing]
+        if not grabbing:
+            raise RuntimeError("No cameras are currently grabbing")
+        if camera_ids is None:
+            camera_ids = grabbing
+        else:
+            for cid in camera_ids:
+                if cid not in self._cameras:
+                    raise KeyError(f"Camera {cid} not found")
+                if not self._cameras[cid].is_grabbing:
+                    raise RuntimeError(f"Camera {cid} is not grabbing")
+
+        recording_id, queues = self._recording_manager.start(camera_ids)
+        for cid, q in queues.items():
+            self._cameras[cid]._record_queue = q
+        return recording_id
+
+    def stop_recording(self) -> dict:
+        for cam in self._cameras.values():
+            cam._record_queue = None
+        return self._recording_manager.stop()
+
     def shutdown(self):
+        if self._recording_manager.is_recording:
+            try:
+                self.stop_recording()
+            except Exception as e:
+                log.warning("Error stopping recording on shutdown: %s", e)
         for cam in self._cameras.values():
             try:
                 cam.close()

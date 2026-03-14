@@ -4,7 +4,9 @@
       "Bash(find:*)",
       "Bash(cd:*)",
       "Bash(mkdir:*)",
-      "Bash(git init:*)"
+      "Bash(git init:*)",
+      "Bash(echo $MVCAM_COMMON_RUNENV)",
+      "Read(//etc/profile.d/**)"
     ]
   }
 }

@@ -40,6 +40,9 @@ h1 { margin-bottom: 16px; font-size: 1.4em; }
 .stats { padding: 8px 16px; border-top: 1px solid #333; display: flex; gap: 16px; font-size: 0.75em; color: #666; }
 .stats span { font-family: monospace; }
 .stats .label { color: #555; }
+.recording-badge { padding: 3px 10px; border-radius: 10px; font-size: 0.78em; font-weight: bold; text-transform: uppercase; background: #333; color: #666; }
+.recording-badge.active { background: #4a1a1a; color: #f66; animation: pulse 1.2s infinite; }
+@keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.5; } }
 </style>
 </head>
 <body>
@@ -47,6 +50,11 @@ h1 { margin-bottom: 16px; font-size: 1.4em; }
 <div class="toolbar">
   <button onclick="discover()">Discover Cameras</button>
   <span id="cam-count" style="color:#666; font-size:0.85em;"></span>
+  <div style="margin-left:auto; display:flex; gap:10px; align-items:center;">
+    <span id="rec-badge" class="recording-badge">Not Recording</span>
+    <button id="btn-rec-start" onclick="startRecording()">&#9679; Start Recording</button>
+    <button id="btn-rec-stop" onclick="stopRecording()" disabled>&#9632; Stop Recording</button>
+  </div>
 </div>
 <div class="grid" id="grid"></div>
 
@@ -200,6 +208,36 @@ async function pollStats() {
       if (params.AcquisitionFrameRate) cam._fps = params.AcquisitionFrameRate.current;
       cameras[ip] = cam;
     } catch(e) {}
+  }
+}
+
+let isRecording = false;
+
+async function startRecording() {
+  const res = await api('/api/recordings/start', 'POST');
+  if (res.ok) {
+    isRecording = true;
+    document.getElementById('rec-badge').textContent = 'REC ' + res.recording_id;
+    document.getElementById('rec-badge').className = 'recording-badge active';
+    document.getElementById('btn-rec-start').disabled = true;
+    document.getElementById('btn-rec-stop').disabled = false;
+  } else {
+    alert('Start recording failed: ' + res.error);
+  }
+}
+
+async function stopRecording() {
+  document.getElementById('btn-rec-stop').disabled = true;
+  const res = await api('/api/recordings/stop', 'POST');
+  if (res.ok) {
+    isRecording = false;
+    const counts = Object.entries(res.frame_counts).map(([k,v]) => k+': '+v).join(', ');
+    document.getElementById('rec-badge').textContent = 'Saved ' + res.recording_id + ' (' + counts + ')';
+    document.getElementById('rec-badge').className = 'recording-badge';
+    document.getElementById('btn-rec-start').disabled = false;
+  } else {
+    alert('Stop recording failed: ' + res.error);
+    document.getElementById('btn-rec-stop').disabled = false;
   }
 }
 

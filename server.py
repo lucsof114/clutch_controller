@@ -132,6 +132,26 @@ def stream(camera_id):
     return Response(generate(), mimetype="multipart/x-mixed-replace; boundary=frame")
 
 
+@app.route("/api/recordings/start", methods=["POST"])
+def start_recording():
+    data = request.get_json(silent=True) or {}
+    camera_ids = data.get("camera_ids")
+    try:
+        recording_id = mgr.start_recording(camera_ids)
+        return jsonify({"ok": True, "recording_id": recording_id})
+    except (RuntimeError, KeyError) as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+
+@app.route("/api/recordings/stop", methods=["POST"])
+def stop_recording():
+    try:
+        result = mgr.stop_recording()
+        return jsonify({"ok": True, **result})
+    except RuntimeError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+
 @app.route("/api/cameras/<camera_id>/snapshot")
 def snapshot(camera_id):
     try:
