@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Clutch Camera Controller</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace; background: #111; color: #eee; padding: 20px; }
+h1 { margin-bottom: 16px; font-size: 1.4em; }
+.toolbar { margin-bottom: 16px; display: flex; gap: 10px; align-items: center; }
+.toolbar button { padding: 8px 16px; background: #333; color: #eee; border: 1px solid #555; border-radius: 4px; cursor: pointer; font-size: 0.9em; }
+.toolbar button:hover { background: #444; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(520px, 1fr)); gap: 16px; }
+.card { background: #1a1a1a; border: 1px solid #333; border-radius: 8px; overflow: hidden; }
+.card-header { padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #333; }
+.card-header .info { font-size: 0.85em; }
+.card-header .ip { font-weight: bold; font-size: 1em; }
+.card-header .model { color: #888; font-size: 0.8em; }
+.badge { padding: 2px 8px; border-radius: 10px; font-size: 0.75em; font-weight: bold; text-transform: uppercase; }
+.badge.closed { background: #333; color: #888; }
+.badge.open { background: #1a3a1a; color: #4a4; }
+.badge.grabbing { background: #1a2a4a; color: #4af; }
+.stream-container { background: #000; min-height: 200px; display: flex; align-items: center; justify-content: center; position: relative; }
+.stream-container img { width: 100%; display: block; }
+.stream-container .placeholder { color: #444; font-size: 0.9em; }
+.controls { padding: 12px 16px; display: flex; flex-direction: column; gap: 8px; }
+.btn-row { display: flex; gap: 8px; }
+.btn-row button { flex: 1; padding: 6px 12px; background: #2a2a2a; color: #ccc; border: 1px solid #444; border-radius: 4px; cursor: pointer; font-size: 0.8em; }
+.btn-row button:hover { background: #3a3a3a; }
+.btn-row button.primary { background: #1a4a1a; border-color: #4a4; color: #4a4; }
+.btn-row button.primary:hover { background: #2a5a2a; }
+.btn-row button.danger { background: #4a1a1a; border-color: #a44; color: #a44; }
+.btn-row button.danger:hover { background: #5a2a2a; }
+.btn-row button:disabled { opacity: 0.4; cursor: not-allowed; }
+.slider-row { display: flex; align-items: center; gap: 8px; font-size: 0.8em; }
+.slider-row label { width: 80px; text-align: right; color: #888; flex-shrink: 0; }
+.slider-row input[type=range] { flex: 1; accent-color: #4af; }
+.slider-row .value { width: 70px; text-align: left; font-family: monospace; color: #aaa; }
+.stats { padding: 8px 16px; border-top: 1px solid #333; display: flex; gap: 16px; font-size: 0.75em; color: #666; }
+.stats span { font-family: monospace; }
+.stats .label { color: #555; }
+</style>
+</head>
+<body>
+<h1>Clutch Camera Controller</h1>
+<div class="toolbar">
+  <button onclick="discover()">Discover Cameras</button>
+  <span id="cam-count" style="color:#666; font-size:0.85em;"></span>
+</div>
+<div class="grid" id="grid"></div>
+
+<script>
+const API = '';
+let cameras = {};
+let debounceTimers = {};
+
+async function api(path, method='GET', body=null) {
+  const opts = { method, headers: {} };
+  if (body !== null) {
+    opts.headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(body);
+  }
+  const r = await fetch(API + path, opts);
+  return r.json();
+}
+
+async function discover() {
+  const list = await api('/api/cameras?discover=true');
+  list.forEach(c => { cameras[c.ip] = c; });
+  document.getElementById('cam-count').textContent = list.length + ' camera(s)';
+  render();
+}
+
+async function openCam(ip) {
+  await api(`/api/cameras/${ip}/open`, 'POST', { use_hb: true });
+  await refreshStatus();
+}
+
+async function closeCam(ip) {
+  await api(`/api/cameras/${ip}/close`, 'POST');
+  await refreshStatus();
+}
+
+async function startCam(ip) {
+  await api(`/api/cameras/${ip}/start`, 'POST');
+  await refreshStatus();
+}
+
+async function stopCam(ip) {
+  await api(`/api/cameras/${ip}/stop`, 'POST');
+  await refreshStatus();
+}
+
+function setParam(ip, param, value) {
+  const key = ip + ':' + param;
+  clearTimeout(debounceTimers[key]);
+  debounceTimers[key] = setTimeout(() => {
+    api(`/api/cameras/${ip}/parameters`, 'POST', { [param]: value });
+  }, 300);
+}
+
+function badgeClass(cam) {
+  if (cam.is_grabbing) return 'grabbing';
+  if (cam.is_open) return 'open';
+  return 'closed';
+}
+
+function badgeText(cam) {
+  if (cam.is_grabbing) return 'Streaming';
+  if (cam.is_open) return 'Open';
+  return 'Closed';
+}
+
+function render() {
+  const grid = document.getElementById('grid');
+  grid.innerHTML = '';
+  Object.values(cameras).forEach(cam => {
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.id = 'card-' + cam.ip.replace(/\./g, '-');
+
+    const streamSrc = cam.is_grabbing ? `/api/cameras/${cam.ip}/stream` : '';
+    const streamHtml = cam.is_grabbing
+      ? `<img src="${streamSrc}" alt="stream">`
+      : `<span class="placeholder">No stream</span>`;
+
+    card.innerHTML = `
+      <div class="card-header">
+        <div class="info">
+          <div class="ip">${cam.ip}</div>
+          <div class="model">${cam.model} &middot; ${cam.serial}</div>
+        </div>
+        <span class="badge ${badgeClass(cam)}">${badgeText(cam)}</span>
+      </div>
+      <div class="stream-container">${streamHtml}</div>
+      <div class="controls">
+        <div class="btn-row">
+          <button class="primary" onclick="openCam('${cam.ip}')" ${cam.is_open ? 'disabled' : ''}>Open</button>
+          <button class="danger" onclick="closeCam('${cam.ip}')" ${!cam.is_open ? 'disabled' : ''}>Close</button>
+          <button class="primary" onclick="startCam('${cam.ip}')" ${!cam.is_open || cam.is_grabbing ? 'disabled' : ''}>Start</button>
+          <button class="danger" onclick="stopCam('${cam.ip}')" ${!cam.is_grabbing ? 'disabled' : ''}>Stop</button>
+        </div>
+        <div class="slider-row">
+          <label>Exposure</label>
+          <input type="range" min="0" max="5" step="0.01" value="${Math.log10(Math.max(cam._exposure || 10000, 1))}"
+            oninput="this.nextElementSibling.textContent=Math.round(Math.pow(10,this.value))+'us'; setParam('${cam.ip}','exposure_us',Math.pow(10,this.value))"
+            ${!cam.is_open ? 'disabled' : ''}>
+          <span class="value">${Math.round(cam._exposure || 10000)}us</span>
+        </div>
+        <div class="slider-row">
+          <label>Gain</label>
+          <input type="range" min="0" max="24" step="0.1" value="${cam._gain || 0}"
+            oninput="this.nextElementSibling.textContent=parseFloat(this.value).toFixed(1)+'dB'; setParam('${cam.ip}','gain',parseFloat(this.value))"
+            ${!cam.is_open ? 'disabled' : ''}>
+          <span class="value">${(cam._gain || 0).toFixed(1)}dB</span>
+        </div>
+        <div class="slider-row">
+          <label>Frame Rate</label>
+          <input type="range" min="1" max="35" step="1" value="${cam._fps || 24}"
+            oninput="this.nextElementSibling.textContent=this.value+'fps'; setParam('${cam.ip}','frame_rate',parseFloat(this.value))"
+            ${!cam.is_open ? 'disabled' : ''}>
+          <span class="value">${cam._fps || 24}fps</span>
+        </div>
+      </div>
+      <div class="stats">
+        <span><span class="label">FPS:</span> <span id="fps-${cam.ip.replace(/\./g,'-')}">${cam.acq_fps}</span></span>
+        <span><span class="label">Frames:</span> <span id="fc-${cam.ip.replace(/\./g,'-')}">${cam.frame_count}</span></span>
+        <span><span class="label">Lost:</span> <span id="lp-${cam.ip.replace(/\./g,'-')}">${cam.lost_packets}</span></span>
+      </div>
+    `;
+    grid.appendChild(card);
+  });
+}
+
+async function refreshStatus() {
+  const list = await api('/api/cameras');
+  list.forEach(c => { cameras[c.ip] = c; });
+  render();
+}
+
+async function pollStats() {
+  for (const ip of Object.keys(cameras)) {
+    const cam = cameras[ip];
+    if (!cam.is_open) continue;
+    try {
+      const params = await api(`/api/cameras/${ip}/parameters`);
+      const dash = ip.replace(/\./g, '-');
+      if (params._stats) {
+        const el_fps = document.getElementById('fps-' + dash);
+        const el_fc = document.getElementById('fc-' + dash);
+        const el_lp = document.getElementById('lp-' + dash);
+        if (el_fps) el_fps.textContent = params._stats.acq_fps;
+        if (el_fc) el_fc.textContent = params._stats.frame_count;
+        if (el_lp) el_lp.textContent = params._stats.lost_packets;
+      }
+      // Cache current values for sliders
+      if (params.ExposureTime) cam._exposure = params.ExposureTime.current;
+      if (params.Gain) cam._gain = params.Gain.current;
+      if (params.AcquisitionFrameRate) cam._fps = params.AcquisitionFrameRate.current;
+      cameras[ip] = cam;
+    } catch(e) {}
+  }
+}
+
+// Initial load
+discover();
+
+// Poll stats every 2 seconds
+setInterval(pollStats, 2000);
+</script>
+</body>
+</html>
