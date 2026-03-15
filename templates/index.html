@@ -3,248 +3,930 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Clutch Camera Controller</title>
+<title>Clutch</title>
 <style>
-* { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace; background: #111; color: #eee; padding: 20px; }
-h1 { margin-bottom: 16px; font-size: 1.4em; }
-.toolbar { margin-bottom: 16px; display: flex; gap: 10px; align-items: center; }
-.toolbar button { padding: 8px 16px; background: #333; color: #eee; border: 1px solid #555; border-radius: 4px; cursor: pointer; font-size: 0.9em; }
-.toolbar button:hover { background: #444; }
-.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(520px, 1fr)); gap: 16px; }
-.card { background: #1a1a1a; border: 1px solid #333; border-radius: 8px; overflow: hidden; }
-.card-header { padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #333; }
-.card-header .info { font-size: 0.85em; }
-.card-header .ip { font-weight: bold; font-size: 1em; }
-.card-header .model { color: #888; font-size: 0.8em; }
-.badge { padding: 2px 8px; border-radius: 10px; font-size: 0.75em; font-weight: bold; text-transform: uppercase; }
-.badge.closed { background: #333; color: #888; }
-.badge.open { background: #1a3a1a; color: #4a4; }
-.badge.grabbing { background: #1a2a4a; color: #4af; }
-.stream-container { background: #000; min-height: 200px; display: flex; align-items: center; justify-content: center; position: relative; }
-.stream-container img { width: 100%; display: block; }
-.stream-container .placeholder { color: #444; font-size: 0.9em; }
-.controls { padding: 12px 16px; display: flex; flex-direction: column; gap: 8px; }
-.btn-row { display: flex; gap: 8px; }
-.btn-row button { flex: 1; padding: 6px 12px; background: #2a2a2a; color: #ccc; border: 1px solid #444; border-radius: 4px; cursor: pointer; font-size: 0.8em; }
-.btn-row button:hover { background: #3a3a3a; }
-.btn-row button.primary { background: #1a4a1a; border-color: #4a4; color: #4a4; }
-.btn-row button.primary:hover { background: #2a5a2a; }
-.btn-row button.danger { background: #4a1a1a; border-color: #a44; color: #a44; }
-.btn-row button.danger:hover { background: #5a2a2a; }
-.btn-row button:disabled { opacity: 0.4; cursor: not-allowed; }
-.slider-row { display: flex; align-items: center; gap: 8px; font-size: 0.8em; }
-.slider-row label { width: 80px; text-align: right; color: #888; flex-shrink: 0; }
-.slider-row input[type=range] { flex: 1; accent-color: #4af; }
-.slider-row .value { width: 70px; text-align: left; font-family: monospace; color: #aaa; }
-.stats { padding: 8px 16px; border-top: 1px solid #333; display: flex; gap: 16px; font-size: 0.75em; color: #666; }
-.stats span { font-family: monospace; }
-.stats .label { color: #555; }
-.recording-badge { padding: 3px 10px; border-radius: 10px; font-size: 0.78em; font-weight: bold; text-transform: uppercase; background: #333; color: #666; }
-.recording-badge.active { background: #4a1a1a; color: #f66; animation: pulse 1.2s infinite; }
-@keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.5; } }
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg: #0a0a0a;
+  --surface: #111;
+  --surface2: #181818;
+  --surface3: #1e1e1e;
+  --border: #1f1f1f;
+  --border2: #2a2a2a;
+  --text: #e8e8e8;
+  --text2: #888;
+  --text3: #444;
+  --accent: #3b82f6;
+  --green: #22c55e;
+  --red: #ef4444;
+  --amber: #f59e0b;
+  --font-mono: "SF Mono", "Fira Code", ui-monospace, monospace;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+/* ── Header ─────────────────────────────────────────────── */
+header {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  padding: 0 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  height: 48px;
+}
+
+.logo {
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text);
+  margin-right: 28px;
+  white-space: nowrap;
+}
+.logo span { color: var(--accent); }
+
+/* Tab nav */
+.tabs { display: flex; gap: 0; height: 100%; align-items: stretch; }
+.tab {
+  padding: 0 18px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text2);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  display: flex; align-items: center;
+  transition: color 0.15s, border-color 0.15s;
+  user-select: none;
+  white-space: nowrap;
+}
+.tab:hover { color: var(--text); }
+.tab.active { color: var(--text); border-bottom-color: var(--accent); }
+
+.header-sep { flex: 1; }
+#cam-count { font-size: 11px; color: var(--text3); font-family: var(--font-mono); margin-right: 16px; }
+
+/* Recording controls */
+.rec-area { display: flex; align-items: center; gap: 10px; }
+#rec-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text3); transition: background 0.2s; }
+#rec-dot.active { background: var(--red); animation: blink 1s infinite; }
+@keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.25} }
+#rec-label { font-family: var(--font-mono); font-size: 11px; color: var(--text2); min-width: 100px; }
+
+.btn {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 5px 13px;
+  border-radius: 5px;
+  border: 1px solid var(--border2);
+  background: var(--surface2);
+  color: var(--text);
+  font-size: 12px; font-weight: 500;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s;
+  white-space: nowrap;
+}
+.btn:hover:not(:disabled) { background: #222; border-color: #3a3a3a; }
+.btn:disabled { opacity: 0.3; cursor: not-allowed; }
+.btn.danger { border-color: #5a1a1a; color: var(--red); }
+.btn.danger:hover:not(:disabled) { background: #1c0808; border-color: var(--red); }
+.btn.primary { border-color: #1e3a5f; color: var(--accent); }
+.btn.primary:hover:not(:disabled) { background: #0d1e30; border-color: var(--accent); }
+
+/* ── Page areas ──────────────────────────────────────────── */
+.page { display: none; padding: 20px; }
+.page.active { display: block; }
+
+/* ── Camera grid ─────────────────────────────────────────── */
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(540px, 1fr));
+  gap: 16px;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+/* Stream */
+.stream-wrap {
+  position: relative;
+  background: #000;
+  aspect-ratio: 2448 / 2048;
+  overflow: hidden;
+}
+.stream-wrap img { width: 100%; height: 100%; object-fit: contain; display: block; }
+
+/* Paused overlay */
+.stream-paused {
+  position: absolute; inset: 0;
+  background: #000;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  gap: 8px;
+  color: var(--text3);
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.stream-paused svg { width: 28px; height: 28px; fill: var(--text3); opacity: 0.4; }
+
+/* Init overlay */
+.stream-init {
+  position: absolute; inset: 0;
+  background: #000;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  gap: 10px;
+  color: var(--text3);
+  font-size: 11px;
+}
+.spinner {
+  width: 18px; height: 18px;
+  border: 2px solid var(--border2);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.75s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Stream overlays */
+.stream-top {
+  position: absolute; top: 0; left: 0; right: 0;
+  padding: 10px 12px;
+  display: flex; align-items: flex-start; justify-content: space-between;
+  background: linear-gradient(to bottom, rgba(0,0,0,0.65) 0%, transparent 100%);
+  pointer-events: none;
+}
+.cam-id { font-family: var(--font-mono); font-size: 12px; font-weight: 600; color: #fff; }
+.cam-sub { font-size: 10px; color: rgba(255,255,255,0.45); margin-top: 2px; }
+.status-dot { width: 7px; height: 7px; border-radius: 50%; margin-top: 4px; background: var(--text3); }
+.status-dot.grabbing { background: var(--green); box-shadow: 0 0 5px var(--green); }
+.status-dot.open { background: var(--amber); }
+
+.stream-bottom {
+  position: absolute; bottom: 0; left: 0; right: 0;
+  padding: 8px 12px;
+  display: flex; align-items: center; justify-content: space-between;
+  background: linear-gradient(to top, rgba(0,0,0,0.65) 0%, transparent 100%);
+}
+.stats-row { display: flex; gap: 12px; font-family: var(--font-mono); font-size: 10px; color: rgba(255,255,255,0.45); }
+.stats-row .v { color: rgba(255,255,255,0.8); }
+
+.play-btn {
+  width: 30px; height: 30px; border-radius: 50%;
+  border: 1px solid rgba(255,255,255,0.2);
+  background: rgba(0,0,0,0.55);
+  color: #fff; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: background 0.12s, border-color 0.12s;
+  flex-shrink: 0;
+}
+.play-btn:hover { background: rgba(0,0,0,0.8); border-color: rgba(255,255,255,0.45); }
+.play-btn svg { width: 11px; height: 11px; fill: currentColor; }
+
+/* Params panel */
+.params-panel { border-top: 1px solid var(--border); padding: 12px 16px 14px; }
+.params-hdr {
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: 10px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.07em; color: var(--text2);
+  cursor: pointer; user-select: none; margin-bottom: 11px;
+}
+.params-hdr .chev { transition: transform 0.18s; font-size: 9px; color: var(--text3); }
+.params-hdr.closed .chev { transform: rotate(-90deg); }
+.params-body { display: flex; flex-direction: column; gap: 9px; }
+.params-body.hidden { display: none; }
+
+.param-row { display: grid; grid-template-columns: 68px 1fr 68px 36px; align-items: center; gap: 8px; }
+.p-label { font-size: 11px; color: var(--text2); text-align: right; }
+.p-unit  { font-size: 10px; color: var(--text3); font-family: var(--font-mono); }
+
+input[type=range] {
+  -webkit-appearance: none; width: 100%; height: 3px;
+  background: var(--border2); border-radius: 2px; outline: none; cursor: pointer;
+}
+input[type=range]::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 13px; height: 13px;
+  border-radius: 50%; background: var(--accent); cursor: pointer;
+  box-shadow: 0 0 0 2px rgba(59,130,246,0.25);
+}
+input[type=range]:disabled { opacity: 0.25; cursor: not-allowed; }
+
+.p-input {
+  background: var(--surface2); border: 1px solid var(--border2);
+  border-radius: 4px; color: var(--text); font-family: var(--font-mono);
+  font-size: 11px; padding: 3px 6px; width: 100%; text-align: right; outline: none;
+}
+.p-input:focus { border-color: var(--accent); }
+.p-input.dirty { border-color: var(--amber); }
+.p-input:disabled { opacity: 0.25; cursor: not-allowed; }
+
+.trigger-row {
+  display: grid;
+  grid-template-columns: 68px 1fr 68px;
+  align-items: center;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.trigger-seg {
+  display: flex;
+  background: var(--surface2);
+  border: 1px solid var(--border2);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.seg-btn {
+  flex: 1; padding: 4px 0;
+  background: transparent;
+  border: none;
+  color: var(--text2);
+  font-size: 11px; font-weight: 500;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+.seg-btn:hover:not(:disabled) { background: var(--surface3); color: var(--text); }
+.seg-btn.active { background: var(--surface3); color: var(--text); }
+.seg-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+/* Triggered-active style */
+.trigger-seg:has(.seg-btn.active:last-child) .seg-btn.active {
+  background: rgba(59,130,246,0.15); color: var(--accent);
+}
+
+.fire-btn {
+  padding: 4px 8px;
+  background: rgba(59,130,246,0.1);
+  border: 1px solid rgba(59,130,246,0.3);
+  border-radius: 4px;
+  color: var(--accent);
+  font-size: 11px; font-weight: 600;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s;
+  white-space: nowrap;
+}
+.fire-btn:hover:not(:disabled) { background: rgba(59,130,246,0.2); border-color: var(--accent); }
+.fire-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+.fire-btn:active:not(:disabled) { background: rgba(59,130,246,0.35); }
+
+.params-footer { margin-top: 11px; display: flex; justify-content: flex-end; }
+.apply-btn {
+  padding: 4px 14px; border-radius: 4px;
+  border: 1px solid var(--border2); background: var(--surface2);
+  color: var(--text2); font-size: 11px; font-weight: 500; cursor: pointer;
+  transition: all 0.12s;
+}
+.apply-btn:hover:not(:disabled) { background: #222; color: var(--text); border-color: #3a3a3a; }
+.apply-btn.dirty { border-color: var(--amber); color: var(--amber); background: rgba(245,158,11,0.07); }
+.apply-btn:disabled { opacity: 0.25; cursor: not-allowed; }
+
+/* ── Recordings tab ──────────────────────────────────────── */
+.rec-list { display: flex; flex-direction: column; gap: 8px; max-width: 960px; }
+
+.rec-item {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.rec-item-hdr {
+  display: flex; align-items: center; gap: 14px;
+  padding: 13px 18px;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.12s;
+}
+.rec-item-hdr:hover { background: var(--surface2); }
+
+.rec-id {
+  font-family: var(--font-mono); font-size: 13px; font-weight: 600;
+  color: var(--text);
+}
+
+.rec-pills { display: flex; gap: 6px; align-items: center; }
+.pill {
+  padding: 2px 8px; border-radius: 10px;
+  font-size: 10px; font-weight: 600;
+  background: var(--surface3); color: var(--text2);
+  border: 1px solid var(--border2);
+  white-space: nowrap;
+}
+
+.rec-item-hdr-sep { flex: 1; }
+.rec-chev { color: var(--text3); font-size: 10px; transition: transform 0.2s; margin-left: 10px; }
+.rec-item-hdr.open .rec-chev { transform: rotate(180deg); }
+
+.del-btn {
+  width: 26px; height: 26px; border-radius: 4px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text3);
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: color 0.12s, background 0.12s, border-color 0.12s;
+  flex-shrink: 0;
+}
+.del-btn:hover { color: var(--red); background: rgba(239,68,68,0.08); border-color: rgba(239,68,68,0.25); }
+.del-btn svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
+
+.rec-detail {
+  border-top: 1px solid var(--border);
+  padding: 18px;
+  display: none;
+}
+.rec-detail.open { display: block; }
+
+/* Detail layout */
+.rec-meta-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 1px;
+  background: var(--border);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  margin-bottom: 18px;
+}
+.rec-meta-cell {
+  background: var(--surface2);
+  padding: 10px 14px;
+}
+.rec-meta-cell .lbl { font-size: 10px; color: var(--text2); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 3px; }
+.rec-meta-cell .val { font-family: var(--font-mono); font-size: 12px; color: var(--text); }
+
+.rec-cameras-hdr {
+  font-size: 10px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.07em; color: var(--text2); margin-bottom: 10px;
+}
+
+.rec-cameras-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 10px;
+}
+
+.cam-card {
+  background: var(--surface2);
+  border: 1px solid var(--border2);
+  border-radius: 6px;
+  padding: 12px 14px;
+}
+.cam-card-hdr {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  margin-bottom: 10px;
+  padding-bottom: 9px;
+  border-bottom: 1px solid var(--border);
+}
+.cam-card-id { font-family: var(--font-mono); font-size: 12px; font-weight: 600; }
+.cam-card-model { font-size: 10px; color: var(--text2); margin-top: 2px; }
+.cam-stat { text-align: right; }
+.cam-stat .sv { font-family: var(--font-mono); font-size: 13px; font-weight: 600; }
+.cam-stat .sl { font-size: 10px; color: var(--text2); margin-top: 1px; }
+
+.cam-params { display: flex; flex-direction: column; gap: 5px; }
+.cam-param-row {
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: 11px;
+}
+.cam-param-row .pk { color: var(--text2); }
+.cam-param-row .pv { font-family: var(--font-mono); color: var(--text); }
+
+/* Empty/loading states */
+.empty {
+  padding: 60px 0; text-align: center; color: var(--text3);
+  font-size: 12px; grid-column: 1/-1;
+}
+.empty .spinner { margin: 0 auto 12px; }
 </style>
 </head>
 <body>
-<h1>Clutch Camera Controller</h1>
-<div class="toolbar">
-  <button onclick="discover()">Discover Cameras</button>
-  <span id="cam-count" style="color:#666; font-size:0.85em;"></span>
-  <div style="margin-left:auto; display:flex; gap:10px; align-items:center;">
-    <span id="rec-badge" class="recording-badge">Not Recording</span>
-    <button id="btn-rec-start" onclick="startRecording()">&#9679; Start Recording</button>
-    <button id="btn-rec-stop" onclick="stopRecording()" disabled>&#9632; Stop Recording</button>
+
+<header>
+  <div class="logo">Clutch <span>//</span></div>
+  <nav class="tabs">
+    <div class="tab active" id="tab-cameras" onclick="showTab('cameras')">Cameras</div>
+    <div class="tab" id="tab-recordings" onclick="showTab('recordings')">Recordings</div>
+  </nav>
+  <div class="header-sep"></div>
+  <span id="cam-count"></span>
+  <div class="rec-area">
+    <div id="rec-dot"></div>
+    <span id="rec-label">idle</span>
+    <button class="btn primary" id="btn-rec" onclick="toggleRecording()">&#9679;&nbsp;Record</button>
+  </div>
+</header>
+
+<!-- Cameras page -->
+<div class="page active" id="page-cameras">
+  <div class="grid" id="grid">
+    <div class="empty"><div class="spinner"></div>Discovering cameras…</div>
   </div>
 </div>
-<div class="grid" id="grid"></div>
+
+<!-- Recordings page -->
+<div class="page" id="page-recordings">
+  <div class="rec-list" id="rec-list">
+    <div class="empty"><div class="spinner"></div>Loading recordings…</div>
+  </div>
+</div>
 
 <script>
-const API = '';
-let cameras = {};
-let debounceTimers = {};
+// ── State ─────────────────────────────────────────────────────────────────
+const cameras   = {};     // ip → status
+const paramState = {};    // ip → { exposure, gain, frameRate, dirty }
+const paused    = new Set(); // IPs with stream display paused
+let isRecording = false;
+let currentTab  = 'cameras';
 
-async function api(path, method='GET', body=null) {
-  const opts = { method, headers: {} };
-  if (body !== null) {
-    opts.headers['Content-Type'] = 'application/json';
-    opts.body = JSON.stringify(body);
-  }
-  const r = await fetch(API + path, opts);
-  return r.json();
+// ── Tab switching ─────────────────────────────────────────────────────────
+function showTab(name) {
+  currentTab = name;
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  document.getElementById('page-' + name).classList.add('active');
+  if (name === 'recordings') loadRecordings();
 }
 
-async function discover() {
+// ── API ───────────────────────────────────────────────────────────────────
+async function api(path, method = 'GET', body = null) {
+  const opts = { method, headers: {} };
+  if (body !== null) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
+  return (await fetch(path, opts)).json();
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────
+async function init() {
   const list = await api('/api/cameras?discover=true');
   list.forEach(c => { cameras[c.ip] = c; });
-  document.getElementById('cam-count').textContent = list.length + ' camera(s)';
-  render();
+  const n = list.length;
+  document.getElementById('cam-count').textContent = n + ' camera' + (n !== 1 ? 's' : '');
+  renderAll();
+  for (const cam of list) autoStart(cam.ip);
 }
 
-async function openCam(ip) {
-  await api(`/api/cameras/${ip}/open`, 'POST', { use_hb: true });
-  await refreshStatus();
+async function autoStart(ip) {
+  if (!cameras[ip].is_open) await api(`/api/cameras/${ip}/open`, 'POST', {});
+
+  let updated = await api('/api/cameras');
+  updated.forEach(c => { cameras[c.ip] = c; });
+
+  if (!cameras[ip].is_grabbing) await api(`/api/cameras/${ip}/start`, 'POST');
+
+  // Must refresh after start so renderCard sees is_grabbing=true and sets the stream src
+  updated = await api('/api/cameras');
+  updated.forEach(c => { cameras[c.ip] = c; });
+
+  await refreshParams(ip);
+  renderCard(ip);
 }
 
-async function closeCam(ip) {
-  await api(`/api/cameras/${ip}/close`, 'POST');
-  await refreshStatus();
-}
-
-async function startCam(ip) {
-  await api(`/api/cameras/${ip}/start`, 'POST');
-  await refreshStatus();
-}
-
-async function stopCam(ip) {
-  await api(`/api/cameras/${ip}/stop`, 'POST');
-  await refreshStatus();
-}
-
-function setParam(ip, param, value) {
-  const key = ip + ':' + param;
-  clearTimeout(debounceTimers[key]);
-  debounceTimers[key] = setTimeout(() => {
-    api(`/api/cameras/${ip}/parameters`, 'POST', { [param]: value });
-  }, 300);
-}
-
-function badgeClass(cam) {
-  if (cam.is_grabbing) return 'grabbing';
-  if (cam.is_open) return 'open';
-  return 'closed';
-}
-
-function badgeText(cam) {
-  if (cam.is_grabbing) return 'Streaming';
-  if (cam.is_open) return 'Open';
-  return 'Closed';
-}
-
-function render() {
+// ── Camera grid ────────────────────────────────────────────────────────────
+function renderAll() {
   const grid = document.getElementById('grid');
   grid.innerHTML = '';
-  Object.values(cameras).forEach(cam => {
-    const card = document.createElement('div');
-    card.className = 'card';
-    card.id = 'card-' + cam.ip.replace(/\./g, '-');
-
-    const streamSrc = cam.is_grabbing ? `/api/cameras/${cam.ip}/stream` : '';
-    const streamHtml = cam.is_grabbing
-      ? `<img src="${streamSrc}" alt="stream">`
-      : `<span class="placeholder">No stream</span>`;
-
-    card.innerHTML = `
-      <div class="card-header">
-        <div class="info">
-          <div class="ip">${cam.ip}</div>
-          <div class="model">${cam.model} &middot; ${cam.serial}</div>
-        </div>
-        <span class="badge ${badgeClass(cam)}">${badgeText(cam)}</span>
-      </div>
-      <div class="stream-container">${streamHtml}</div>
-      <div class="controls">
-        <div class="btn-row">
-          <button class="primary" onclick="openCam('${cam.ip}')" ${cam.is_open ? 'disabled' : ''}>Open</button>
-          <button class="danger" onclick="closeCam('${cam.ip}')" ${!cam.is_open ? 'disabled' : ''}>Close</button>
-          <button class="primary" onclick="startCam('${cam.ip}')" ${!cam.is_open || cam.is_grabbing ? 'disabled' : ''}>Start</button>
-          <button class="danger" onclick="stopCam('${cam.ip}')" ${!cam.is_grabbing ? 'disabled' : ''}>Stop</button>
-        </div>
-        <div class="slider-row">
-          <label>Exposure</label>
-          <input type="range" min="0" max="5" step="0.01" value="${Math.log10(Math.max(cam._exposure || 10000, 1))}"
-            oninput="this.nextElementSibling.textContent=Math.round(Math.pow(10,this.value))+'us'; setParam('${cam.ip}','exposure_us',Math.pow(10,this.value))"
-            ${!cam.is_open ? 'disabled' : ''}>
-          <span class="value">${Math.round(cam._exposure || 10000)}us</span>
-        </div>
-        <div class="slider-row">
-          <label>Gain</label>
-          <input type="range" min="0" max="24" step="0.1" value="${cam._gain || 0}"
-            oninput="this.nextElementSibling.textContent=parseFloat(this.value).toFixed(1)+'dB'; setParam('${cam.ip}','gain',parseFloat(this.value))"
-            ${!cam.is_open ? 'disabled' : ''}>
-          <span class="value">${(cam._gain || 0).toFixed(1)}dB</span>
-        </div>
-        <div class="slider-row">
-          <label>Frame Rate</label>
-          <input type="range" min="1" max="35" step="1" value="${cam._fps || 24}"
-            oninput="this.nextElementSibling.textContent=this.value+'fps'; setParam('${cam.ip}','frame_rate',parseFloat(this.value))"
-            ${!cam.is_open ? 'disabled' : ''}>
-          <span class="value">${cam._fps || 24}fps</span>
-        </div>
-      </div>
-      <div class="stats">
-        <span><span class="label">FPS:</span> <span id="fps-${cam.ip.replace(/\./g,'-')}">${cam.acq_fps}</span></span>
-        <span><span class="label">Frames:</span> <span id="fc-${cam.ip.replace(/\./g,'-')}">${cam.frame_count}</span></span>
-        <span><span class="label">Lost:</span> <span id="lp-${cam.ip.replace(/\./g,'-')}">${cam.lost_packets}</span></span>
-      </div>
-    `;
-    grid.appendChild(card);
-  });
+  const ips = Object.keys(cameras);
+  if (!ips.length) { grid.innerHTML = '<div class="empty">No cameras found.</div>'; return; }
+  ips.forEach(ip => renderCard(ip));
 }
 
-async function refreshStatus() {
-  const list = await api('/api/cameras');
-  list.forEach(c => { cameras[c.ip] = c; });
-  render();
+function renderCard(ip) {
+  const cam = cameras[ip];
+  const id  = ip.replace(/\./g, '-');
+  const ps  = paramState[ip] || {};
+  const exp = ps.exposure  ?? 5000;
+  const gn  = ps.gain      ?? 0;
+  const fr  = ps.frameRate ?? 24;
+  const dis = !cam.is_open ? 'disabled' : '';
+  const dotCls = cam.is_grabbing ? 'grabbing' : cam.is_open ? 'open' : '';
+
+  const card = document.createElement('div');
+  card.className = 'card';
+  card.id = 'card-' + id;
+
+  card.innerHTML = `
+    <div class="stream-wrap">
+      <img id="img-${id}" ${cam.is_grabbing && !paused.has(ip) ? `src="/api/cameras/${ip}/stream"` : ''} alt="">
+      ${!cam.is_grabbing ? `
+        <div class="stream-init" id="overlay-${id}">
+          <div class="spinner"></div>
+          <span>${cam.is_open ? 'Starting stream…' : 'Initialising…'}</span>
+        </div>` : paused.has(ip) ? `
+        <div class="stream-paused" id="overlay-${id}">
+          <svg viewBox="0 0 24 24"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
+          Paused
+        </div>` : `<div id="overlay-${id}" style="display:none"></div>`
+      }
+      <div class="stream-top">
+        <div>
+          <div class="cam-id">${ip}</div>
+          <div class="cam-sub">${cam.model} &middot; ${cam.serial}</div>
+        </div>
+        <div class="status-dot ${dotCls}" id="dot-${id}"></div>
+      </div>
+      <div class="stream-bottom">
+        <div class="stats-row">
+          <span>FPS&nbsp;<span class="v" id="fps-${id}">—</span></span>
+          <span>Frames&nbsp;<span class="v" id="fc-${id}">—</span></span>
+          <span>Lost&nbsp;<span class="v" id="lp-${id}">—</span></span>
+        </div>
+        <button class="play-btn" id="pb-${id}" onclick="togglePlay('${ip}')" title="Play/Pause">
+          ${playIcon(ip, cam)}
+        </button>
+      </div>
+    </div>
+    <div class="params-panel">
+      <div class="params-hdr" id="phdr-${id}" onclick="toggleParams('${id}')">
+        Parameters <span class="chev">&#9660;</span>
+      </div>
+      <div class="params-body" id="pbody-${id}">
+        ${pRow(ip, 'exposure',  'Exposure',   exp, 15, 100000, 'log', 'µs',  dis)}
+        ${pRow(ip, 'gain',      'Gain',        gn,  0,  23.98, 'lin', 'dB',  dis)}
+        ${pRow(ip, 'frameRate', 'Frame Rate',  fr,  1,  35,    'lin', 'fps', dis)}
+        <div class="trigger-row">
+          <span class="p-label" style="text-align:right;font-size:11px;color:var(--text2)">Trigger</span>
+          <div class="trigger-seg ${dis}" id="trigseg-${id}">
+            <button class="seg-btn ${!cam.trigger_mode ? 'active' : ''}"
+              onclick="setTriggerMode('${ip}', false)" ${dis}>Free Run</button>
+            <button class="seg-btn ${cam.trigger_mode ? 'active' : ''}"
+              onclick="setTriggerMode('${ip}', true)" ${dis}>Triggered</button>
+          </div>
+          <button class="fire-btn" id="firebtn-${id}"
+            onclick="fireTrigger('${ip}')"
+            style="${cam.trigger_mode ? '' : 'visibility:hidden'}" ${!cam.trigger_mode || !cam.is_grabbing ? 'disabled' : ''}>
+            &#9654; Fire
+          </button>
+        </div>
+        <div class="params-footer">
+          <button class="apply-btn" id="apply-${id}" onclick="submitParams('${ip}')" ${dis}>Apply</button>
+        </div>
+      </div>
+    </div>`;
+
+  const existing = document.getElementById('card-' + id);
+  if (existing) existing.replaceWith(card);
+  else document.getElementById('grid').appendChild(card);
+}
+
+function playIcon(ip, cam) {
+  if (!cam.is_grabbing || paused.has(ip))
+    return `<svg viewBox="0 0 24 24"><polygon points="5,3 19,12 5,21"/></svg>`;
+  return `<svg viewBox="0 0 24 24"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>`;
+}
+
+// ── Play / Pause (browser-side only, camera keeps grabbing) ───────────────
+function togglePlay(ip) {
+  const cam = cameras[ip];
+  const id  = ip.replace(/\./g, '-');
+
+  if (!cam.is_grabbing) return; // still initialising, do nothing
+
+  const img     = document.getElementById('img-' + id);
+  const overlay = document.getElementById('overlay-' + id);
+  const pb      = document.getElementById('pb-' + id);
+
+  if (paused.has(ip)) {
+    // Resume: reconnect stream
+    paused.delete(ip);
+    img.src = `/api/cameras/${ip}/stream`;
+    overlay.style.display = 'none';
+    pb.innerHTML = `<svg viewBox="0 0 24 24" style="width:11px;height:11px;fill:currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>`;
+  } else {
+    // Pause: drop browser connection, show static paused state
+    paused.add(ip);
+    img.src = '';
+    overlay.innerHTML = `<svg viewBox="0 0 24 24" style="width:28px;height:28px;fill:#444;opacity:0.4"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg><span style="font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:#444">Paused</span>`;
+    overlay.className = 'stream-paused';
+    overlay.style.display = '';
+    pb.innerHTML = `<svg viewBox="0 0 24 24" style="width:11px;height:11px;fill:currentColor"><polygon points="5,3 19,12 5,21"/></svg>`;
+  }
+}
+
+// ── Param rows ────────────────────────────────────────────────────────────
+function pRow(ip, key, label, val, min, max, scale, unit, disabled) {
+  const id  = ip.replace(/\./g, '-');
+  const sMin = scale === 'log' ? Math.log10(Math.max(min, 1)) : min;
+  const sMax = scale === 'log' ? Math.log10(max) : max;
+  const sVal = scale === 'log' ? Math.log10(Math.max(val, 1)) : val;
+  const disp = fmt(val, unit);
+  const step = scale === 'log' ? 0.01 : (unit === 'dB' ? 0.1 : 1);
+  return `
+    <div class="param-row">
+      <span class="p-label">${label}</span>
+      <input type="range" id="sl-${id}-${key}" min="${sMin}" max="${sMax}" step="${step}" value="${sVal}" ${disabled}
+        oninput="onSlider('${ip}','${key}','${scale}','${unit}',this.value)">
+      <input type="text" class="p-input" id="in-${id}-${key}" value="${disp}" ${disabled}
+        onchange="onInput('${ip}','${key}','${scale}','${unit}',this.value)"
+        onkeydown="if(event.key==='Enter')onInput('${ip}','${key}','${scale}','${unit}',this.value)">
+      <span class="p-unit">${unit}</span>
+    </div>`;
+}
+
+function fmt(val, unit) {
+  if (unit === 'dB')  return parseFloat(val).toFixed(1);
+  if (unit === 'fps') return Math.round(val);
+  return Math.round(val);
+}
+
+function onSlider(ip, key, scale, unit, raw) {
+  const val = scale === 'log' ? Math.pow(10, parseFloat(raw)) : parseFloat(raw);
+  const id  = ip.replace(/\./g, '-');
+  const el  = document.getElementById(`in-${id}-${key}`);
+  if (el) { el.value = fmt(val, unit); el.classList.add('dirty'); }
+  markDirty(ip, key, val);
+}
+
+function onInput(ip, key, scale, unit, raw) {
+  const val = parseFloat(raw);
+  if (isNaN(val)) return;
+  const id  = ip.replace(/\./g, '-');
+  const sl  = document.getElementById(`sl-${id}-${key}`);
+  if (sl) sl.value = scale === 'log' ? Math.log10(Math.max(val, 1)) : val;
+  document.getElementById(`in-${id}-${key}`)?.classList.add('dirty');
+  markDirty(ip, key, val);
+}
+
+function markDirty(ip, key, val) {
+  if (!paramState[ip]) paramState[ip] = {};
+  paramState[ip][key] = val;
+  paramState[ip].dirty = true;
+  const id = ip.replace(/\./g, '-');
+  document.getElementById(`apply-${id}`)?.classList.add('dirty');
+}
+
+async function submitParams(ip) {
+  const ps = paramState[ip];
+  if (!ps?.dirty) return;
+  const id = ip.replace(/\./g, '-');
+  const btn = document.getElementById(`apply-${id}`);
+  if (btn) { btn.disabled = true; btn.textContent = 'Applying…'; }
+  const body = {};
+  if (ps.exposure  != null) body.exposure_us = ps.exposure;
+  if (ps.gain      != null) body.gain        = ps.gain;
+  if (ps.frameRate != null) body.frame_rate  = ps.frameRate;
+  await api(`/api/cameras/${ip}/parameters`, 'POST', body);
+  ps.dirty = false;
+  ['exposure','gain','frameRate'].forEach(k =>
+    document.getElementById(`in-${id}-${k}`)?.classList.remove('dirty'));
+  if (btn) { btn.disabled = false; btn.textContent = 'Apply'; btn.classList.remove('dirty'); }
+}
+
+function toggleParams(id) {
+  document.getElementById('pbody-' + id)?.classList.toggle('hidden');
+  document.getElementById('phdr-'  + id)?.classList.toggle('closed');
+}
+
+// ── Stats polling ─────────────────────────────────────────────────────────
+async function refreshParams(ip) {
+  try {
+    const p = await api(`/api/cameras/${ip}/parameters`);
+    if (!paramState[ip]) paramState[ip] = {};
+    const ps = paramState[ip];
+    if (!ps.dirty) {
+      if (p.ExposureTime)          ps.exposure  = p.ExposureTime.current;
+      if (p.Gain)                  ps.gain      = p.Gain.current;
+      if (p.AcquisitionFrameRate)  ps.frameRate = p.AcquisitionFrameRate.current;
+    }
+    if (p._stats) updateStats(ip, p._stats);
+  } catch(e) {}
+}
+
+function updateStats(ip, s) {
+  const id = ip.replace(/\./g, '-');
+  const fps = document.getElementById('fps-' + id);
+  const fc  = document.getElementById('fc-'  + id);
+  const lp  = document.getElementById('lp-'  + id);
+  if (fps) fps.textContent = s.acq_fps ?? '—';
+  if (fc)  fc.textContent  = s.frame_count ?? '—';
+  if (lp)  lp.textContent  = s.lost_packets ?? '—';
 }
 
 async function pollStats() {
   for (const ip of Object.keys(cameras)) {
-    const cam = cameras[ip];
-    if (!cam.is_open) continue;
+    if (!cameras[ip].is_open) continue;
     try {
-      const params = await api(`/api/cameras/${ip}/parameters`);
-      const dash = ip.replace(/\./g, '-');
-      if (params._stats) {
-        const el_fps = document.getElementById('fps-' + dash);
-        const el_fc = document.getElementById('fc-' + dash);
-        const el_lp = document.getElementById('lp-' + dash);
-        if (el_fps) el_fps.textContent = params._stats.acq_fps;
-        if (el_fc) el_fc.textContent = params._stats.frame_count;
-        if (el_lp) el_lp.textContent = params._stats.lost_packets;
+      const p = await api(`/api/cameras/${ip}/parameters`);
+      if (p._stats) updateStats(ip, p._stats);
+      const ps = paramState[ip];
+      if (ps && !ps.dirty) {
+        if (p.ExposureTime)          ps.exposure  = p.ExposureTime.current;
+        if (p.Gain)                  ps.gain      = p.Gain.current;
+        if (p.AcquisitionFrameRate)  ps.frameRate = p.AcquisitionFrameRate.current;
       }
-      // Cache current values for sliders
-      if (params.ExposureTime) cam._exposure = params.ExposureTime.current;
-      if (params.Gain) cam._gain = params.Gain.current;
-      if (params.AcquisitionFrameRate) cam._fps = params.AcquisitionFrameRate.current;
-      cameras[ip] = cam;
     } catch(e) {}
   }
 }
 
-let isRecording = false;
-
-async function startRecording() {
-  const res = await api('/api/recordings/start', 'POST');
-  if (res.ok) {
-    isRecording = true;
-    document.getElementById('rec-badge').textContent = 'REC ' + res.recording_id;
-    document.getElementById('rec-badge').className = 'recording-badge active';
-    document.getElementById('btn-rec-start').disabled = true;
-    document.getElementById('btn-rec-stop').disabled = false;
+// ── Recording ─────────────────────────────────────────────────────────────
+async function toggleRecording() {
+  const btn = document.getElementById('btn-rec');
+  btn.disabled = true;
+  if (!isRecording) {
+    const res = await api('/api/recordings/start', 'POST');
+    if (res.ok) {
+      isRecording = true;
+      document.getElementById('rec-dot').classList.add('active');
+      document.getElementById('rec-label').textContent = res.recording_id;
+      btn.textContent = '■\u00a0Stop'; btn.className = 'btn danger';
+    } else { alert('Start recording failed: ' + res.error); }
   } else {
-    alert('Start recording failed: ' + res.error);
+    document.getElementById('rec-label').textContent = 'stopping…';
+    const res = await api('/api/recordings/stop', 'POST');
+    if (res.ok) {
+      isRecording = false;
+      document.getElementById('rec-dot').classList.remove('active');
+      const total = Object.values(res.frame_counts || {}).reduce((a,b)=>a+b,0);
+      document.getElementById('rec-label').textContent = `saved · ${total} frames`;
+      btn.textContent = '●\u00a0Record'; btn.className = 'btn primary';
+    } else {
+      alert('Stop recording failed: ' + res.error);
+      document.getElementById('rec-label').textContent = 'error';
+    }
+  }
+  btn.disabled = false;
+}
+
+// ── Recordings tab ────────────────────────────────────────────────────────
+async function loadRecordings() {
+  const list = document.getElementById('rec-list');
+  list.innerHTML = '<div class="empty"><div class="spinner"></div>Loading…</div>';
+  const recordings = await api('/api/recordings');
+  if (!recordings.length) {
+    list.innerHTML = '<div class="empty">No recordings yet.</div>';
+    return;
+  }
+  list.innerHTML = '';
+  recordings.forEach(r => list.appendChild(buildRecItem(r)));
+}
+
+function buildRecItem(r) {
+  const el = document.createElement('div');
+  el.className = 'rec-item';
+
+  const camCount = (r.cameras || []).length;
+  const totalFrames = (r.cameras || []).reduce((s,c) => s+c.frame_count, 0);
+  const totalBytes  = (r.cameras || []).reduce((s,c) => s+c.total_size_bytes, 0);
+  const dur = r.duration_seconds != null ? fmtDur(r.duration_seconds) : '—';
+  const size = fmtBytes(totalBytes);
+
+  el.innerHTML = `
+    <div class="rec-item-hdr" onclick="toggleRecItem(this)">
+      <span class="rec-id">${r.recording_id}</span>
+      <div class="rec-pills">
+        <span class="pill">${camCount} cam${camCount!==1?'s':''}</span>
+        <span class="pill">${totalFrames.toLocaleString()} frames</span>
+        <span class="pill">${dur}</span>
+        <span class="pill">${size}</span>
+      </div>
+      <div class="rec-item-hdr-sep"></div>
+      <button class="del-btn" onclick="deleteRecording(event,'${r.recording_id}')" title="Delete recording">
+        <svg viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg>
+      </button>
+      <span class="rec-chev">&#9660;</span>
+    </div>
+    <div class="rec-detail">
+      ${buildRecDetail(r)}
+    </div>`;
+  return el;
+}
+
+function toggleRecItem(hdr) {
+  hdr.classList.toggle('open');
+  hdr.nextElementSibling.classList.toggle('open');
+}
+
+function buildRecDetail(r) {
+  const start = r.start_time ? fmtTs(r.start_time) : '—';
+  const end   = r.end_time   ? fmtTs(r.end_time)   : '—';
+  const dur   = r.duration_seconds != null ? fmtDur(r.duration_seconds) : '—';
+  const totalBytes = (r.cameras||[]).reduce((s,c)=>s+c.total_size_bytes,0);
+
+  const cells = [
+    ['Recording ID', r.recording_id],
+    ['Started',      start],
+    ['Ended',        end],
+    ['Duration',     dur],
+    ['Total Size',   fmtBytes(totalBytes)],
+    ['Cameras',      (r.cameras||[]).length],
+  ];
+
+  const metaGrid = cells.map(([l,v]) =>
+    `<div class="rec-meta-cell"><div class="lbl">${l}</div><div class="val">${v}</div></div>`
+  ).join('');
+
+  const camCards = (r.cameras||[]).map(c => buildCamCard(c)).join('');
+
+  return `
+    <div class="rec-meta-grid">${metaGrid}</div>
+    <div class="rec-cameras-hdr">Cameras (${(r.cameras||[]).length})</div>
+    <div class="rec-cameras-grid">${camCards}</div>`;
+}
+
+function buildCamCard(c) {
+  const params = c.parameters || {};
+  const paramRows = [
+    ['Exposure',   params.ExposureTime  != null ? Math.round(params.ExposureTime)  + ' µs' : '—'],
+    ['Gain',       params.Gain          != null ? parseFloat(params.Gain).toFixed(1) + ' dB' : '—'],
+    ['Frame Rate', params.AcquisitionFrameRate != null ? parseFloat(params.AcquisitionFrameRate).toFixed(1) + ' fps' : '—'],
+    ['Pixel Fmt',  params.PixelFormat   != null ? '0x' + params.PixelFormat.toString(16).toUpperCase() : '—'],
+  ].map(([k,v]) =>
+    `<div class="cam-param-row"><span class="pk">${k}</span><span class="pv">${v}</span></div>`
+  ).join('');
+
+  return `
+    <div class="cam-card">
+      <div class="cam-card-hdr">
+        <div>
+          <div class="cam-card-id">${c.serial || c.camera_id}</div>
+          <div class="cam-card-model">${c.model || '—'} &middot; ${c.camera_id}</div>
+        </div>
+        <div class="cam-stat">
+          <div class="sv">${(c.frame_count||0).toLocaleString()}</div>
+          <div class="sl">frames</div>
+        </div>
+      </div>
+      <div class="cam-params">
+        <div class="cam-param-row">
+          <span class="pk">Size</span>
+          <span class="pv">${fmtBytes(c.total_size_bytes||0)}</span>
+        </div>
+        ${paramRows}
+      </div>
+    </div>`;
+}
+
+// ── Formatting helpers ────────────────────────────────────────────────────
+function fmtTs(iso) {
+  try {
+    const d = new Date(iso);
+    return d.toLocaleString('en-GB', { dateStyle:'medium', timeStyle:'medium', timeZone:'UTC' }) + ' UTC';
+  } catch { return iso; }
+}
+
+function fmtDur(s) {
+  if (s < 60) return s.toFixed(1) + 's';
+  const m = Math.floor(s / 60), sec = Math.floor(s % 60);
+  return `${m}m ${sec}s`;
+}
+
+function fmtBytes(b) {
+  if (!b) return '0 B';
+  if (b < 1024) return b + ' B';
+  if (b < 1048576) return (b/1024).toFixed(1) + ' KB';
+  if (b < 1073741824) return (b/1048576).toFixed(1) + ' MB';
+  return (b/1073741824).toFixed(2) + ' GB';
+}
+
+async function setTriggerMode(ip, enabled) {
+  const id = ip.replace(/\./g, '-');
+  // Optimistic UI update
+  const seg = document.getElementById('trigseg-' + id);
+  seg?.querySelectorAll('.seg-btn').forEach((b, i) => b.classList.toggle('active', i === (enabled ? 1 : 0)));
+  const fireBtn = document.getElementById('firebtn-' + id);
+  if (fireBtn) { fireBtn.style.visibility = enabled ? '' : 'hidden'; fireBtn.disabled = !enabled; }
+
+  await api(`/api/cameras/${ip}/parameters`, 'POST', { trigger_mode: enabled });
+
+  // Sync true state back
+  const updated = await api('/api/cameras');
+  updated.forEach(c => { cameras[c.ip] = c; });
+}
+
+async function fireTrigger(ip) {
+  const id  = ip.replace(/\./g, '-');
+  const btn = document.getElementById('firebtn-' + id);
+  if (btn) btn.disabled = true;
+  await api(`/api/cameras/${ip}/trigger`, 'POST');
+  if (btn) { btn.disabled = false; }
+}
+
+async function deleteRecording(event, recordingId) {
+  event.stopPropagation(); // don't toggle the expand
+  if (!confirm(`Delete recording ${recordingId}?\nThis cannot be undone.`)) return;
+  const res = await api(`/api/recordings/${recordingId}`, 'DELETE');
+  if (res.ok) {
+    loadRecordings();
+  } else {
+    alert('Delete failed: ' + res.error);
   }
 }
 
-async function stopRecording() {
-  document.getElementById('btn-rec-stop').disabled = true;
-  const res = await api('/api/recordings/stop', 'POST');
-  if (res.ok) {
-    isRecording = false;
-    const counts = Object.entries(res.frame_counts).map(([k,v]) => k+': '+v).join(', ');
-    document.getElementById('rec-badge').textContent = 'Saved ' + res.recording_id + ' (' + counts + ')';
-    document.getElementById('rec-badge').className = 'recording-badge';
-    document.getElementById('btn-rec-start').disabled = false;
-  } else {
-    alert('Stop recording failed: ' + res.error);
-    document.getElementById('btn-rec-stop').disabled = false;
-  }
-}
-
-// Initial load
-discover();
-
-// Poll stats every 2 seconds
+// ── Boot ──────────────────────────────────────────────────────────────────
+init();
 setInterval(pollStats, 2000);
 </script>
 </body>

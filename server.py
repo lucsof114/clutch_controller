@@ -1,12 +1,16 @@
 """Flask API server — thin wrapper around CameraManager."""
 
+import json
+import shutil
 import time
 import logging
 import atexit
+from pathlib import Path
 
 from flask import Flask, jsonify, request, Response, render_template
 
 from camera_manager import CameraManager
+from recording_manager import CATALOG_DIR
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
 log = logging.getLogger("server")
@@ -90,6 +94,7 @@ def set_parameters(camera_id):
             "use_hb": "use_hb",
             "gain_auto": "gain_auto",
             "exposure_auto": "exposure_auto",
+            "trigger_mode": "trigger_mode",
         }
 
         config = {}
@@ -132,6 +137,43 @@ def stream(camera_id):
     return Response(generate(), mimetype="multipart/x-mixed-replace; boundary=frame")
 
 
+@app.route("/api/recordings")
+def list_recordings():
+    if not CATALOG_DIR.exists():
+        return jsonify([])
+    recordings = []
+    for f in sorted(CATALOG_DIR.glob("*.json"), reverse=True):
+        try:
+            recordings.append(json.loads(f.read_text()))
+        except Exception:
+            pass
+    return jsonify(recordings)
+
+
+@app.route("/api/recordings/<recording_id>", methods=["DELETE"])
+def delete_recording(recording_id):
+    from recording_manager import RECORDING_BASE, CATALOG_DIR
+    # Sanitise: recording_id must be a plain timestamp string, no path traversal
+    if "/" in recording_id or ".." in recording_id:
+        return jsonify({"ok": False, "error": "Invalid recording_id"}), 400
+    errors = []
+    rec_dir = RECORDING_BASE / recording_id
+    if rec_dir.exists():
+        try:
+            shutil.rmtree(rec_dir)
+        except Exception as e:
+            errors.append(str(e))
+    catalog_file = CATALOG_DIR / f"{recording_id}.json"
+    if catalog_file.exists():
+        try:
+            catalog_file.unlink()
+        except Exception as e:
+            errors.append(str(e))
+    if errors:
+        return jsonify({"ok": False, "error": "; ".join(errors)}), 500
+    return jsonify({"ok": True})
+
+
 @app.route("/api/recordings/start", methods=["POST"])
 def start_recording():
     data = request.get_json(silent=True) or {}
@@ -149,6 +191,16 @@ def stop_recording():
         result = mgr.stop_recording()
         return jsonify({"ok": True, **result})
     except RuntimeError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+
+@app.route("/api/cameras/<camera_id>/trigger", methods=["POST"])
+def fire_trigger(camera_id):
+    try:
+        cam = mgr.get_camera(camera_id)
+        cam.fire_software_trigger()
+        return jsonify({"ok": True})
+    except (KeyError, RuntimeError) as e:
         return jsonify({"ok": False, "error": str(e)}), 400
 
 

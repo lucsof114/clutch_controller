@@ -1,56 +1,91 @@
 """RecordingManager — saver-thread-per-camera PNG recording system."""
 
+from __future__ import annotations
+
 import queue
 import threading
 import logging
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 import cv2
 
+from recording_metadata import CameraRecordingInfo, RecordingMetadata
+
 RECORDING_BASE = Path.home() / "Documents" / "clutch" / "clutch_db"
-QUEUE_MAXSIZE = 120
+CATALOG_DIR    = RECORDING_BASE / "catalog"
+QUEUE_MAXSIZE  = 120
 
 log = logging.getLogger("recording_manager")
+
+
+def _make_frame_id(n: int) -> str:
+    """
+    Sequential zero-padded frame directory name.
+    Swap this function for timestamp-based logic when that system is ready.
+    """
+    return f"{n:06d}"
 
 
 class RecordingManager:
     def __init__(self):
         self._recording_id: str | None = None
+        self._metadata: Optional[RecordingMetadata] = None
         self._queues: dict[str, queue.Queue] = {}
         self._saver_threads: dict[str, threading.Thread] = {}
         self._frame_counts: dict[str, int] = {}
+        self._size_bytes: dict[str, int] = {}
 
     @property
     def is_recording(self) -> bool:
         return self._recording_id is not None
 
-    def start(self, camera_ids: list[str]) -> tuple[str, dict[str, queue.Queue]]:
+    def start(
+        self,
+        camera_ids: list[str],
+        camera_infos: Optional[list[CameraRecordingInfo]] = None,
+    ) -> tuple[str, dict[str, queue.Queue]]:
         if self.is_recording:
             raise RuntimeError("Already recording")
 
         recording_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-        queues: dict[str, queue.Queue] = {}
+        RECORDING_BASE.mkdir(parents=True, exist_ok=True)
 
-        for camera_id in camera_ids:
+        if camera_infos is None:
+            camera_infos = [CameraRecordingInfo(camera_id=cid, model="", serial="")
+                            for cid in camera_ids]
+
+        self._metadata = RecordingMetadata.start(recording_id, camera_infos)
+        self._queues = {}
+        self._saver_threads = {}
+        self._frame_counts = {}
+        self._size_bytes = {}
+
+        # Build camera_id → serial lookup for directory naming
+        serial_map = {info.camera_id: info.serial or info.camera_id
+                      for info in camera_infos}
+
+        for cid in camera_ids:
             q: queue.Queue = queue.Queue(maxsize=QUEUE_MAXSIZE)
-            base_dir = RECORDING_BASE / recording_id / camera_id
+            dir_name = serial_map.get(cid, cid)
+            base_dir = RECORDING_BASE / recording_id / dir_name
             base_dir.mkdir(parents=True, exist_ok=True)
 
             t = threading.Thread(
                 target=self._saver_loop,
-                args=(camera_id, recording_id, q, base_dir),
+                args=(cid, q, base_dir),
                 daemon=False,
+                name=f"saver-{cid}",
             )
             t.start()
 
-            queues[camera_id] = q
-            self._saver_threads[camera_id] = t
+            self._queues[cid] = q
+            self._saver_threads[cid] = t
 
-        self._queues = queues
         self._recording_id = recording_id
-        log.info("Recording started: %s  cameras=%s", recording_id, list(camera_ids))
-        return recording_id, queues
+        log.info("Recording started: %s  cameras=%s", recording_id, camera_ids)
+        return recording_id, dict(self._queues)
 
     def stop(self) -> dict:
         if not self.is_recording:
@@ -62,28 +97,44 @@ class RecordingManager:
         for q in self._queues.values():
             q.put(None)  # sentinel
 
-        for camera_id, t in self._saver_threads.items():
+        for cid, t in self._saver_threads.items():
             t.join()
-            log.info("Saver thread joined for %s", camera_id)
+            log.info("Saver thread joined for %s", cid)
+
+        # Finalise and persist metadata
+        if self._metadata is not None:
+            self._metadata.finalise(self._frame_counts, self._size_bytes)
+            rec_dir = RECORDING_BASE / recording_id
+            self._metadata.save(rec_dir)
+            # Mirror to catalog as a flat <recording_id>.json
+            CATALOG_DIR.mkdir(parents=True, exist_ok=True)
+            import json as _json
+            (CATALOG_DIR / f"{recording_id}.json").write_text(
+                _json.dumps(self._metadata.to_dict(), indent=2)
+            )
+            log.info("Metadata written: %s/metadata.json + catalog", recording_id)
 
         result = {
             "recording_id": recording_id,
             "frame_counts": dict(self._frame_counts),
+            "size_bytes": dict(self._size_bytes),
         }
+        if self._metadata:
+            result["metadata"] = self._metadata.to_dict()
 
         self._queues.clear()
         self._saver_threads.clear()
         self._frame_counts.clear()
+        self._size_bytes.clear()
+        self._metadata = None
 
-        log.info("Recording stopped: %s  frame_counts=%s", recording_id, result["frame_counts"])
+        log.info("Recording stopped: %s  counts=%s", recording_id, result["frame_counts"])
         return result
 
-    @staticmethod
-    def _make_frame_id(n: int) -> str:
-        return f"{n:06d}"
-
-    def _saver_loop(self, camera_id: str, recording_id: str, q: queue.Queue, base_dir: Path):
+    def _saver_loop(self, camera_id: str, q: queue.Queue, base_dir: Path):
         n = 0
+        total_bytes = 0
+
         while True:
             try:
                 frame = q.get(timeout=1.0)
@@ -92,16 +143,24 @@ class RecordingManager:
 
             if frame is None:  # sentinel
                 self._frame_counts[camera_id] = n
-                log.info("Saver loop done for %s: %d frames written", camera_id, n)
+                self._size_bytes[camera_id] = total_bytes
+                log.info("Saver done %s: %d frames, %.1f MB",
+                         camera_id, n, total_bytes / 1_048_576)
                 return
 
-            frame_id = self._make_frame_id(n)
+            frame_id = _make_frame_id(n)
             frame_dir = base_dir / frame_id
             frame_dir.mkdir(exist_ok=True)
             path = str(frame_dir / "frame.png")
 
             ok = cv2.imwrite(path, frame)
-            if not ok:
-                log.error("cv2.imwrite failed for %s frame %s", camera_id, frame_id)
+            if ok:
+                try:
+                    total_bytes += Path(path).stat().st_size
+                except OSError:
+                    pass
+            else:
+                log.error("cv2.imwrite failed: %s", path)
 
+            q.task_done()
             n += 1

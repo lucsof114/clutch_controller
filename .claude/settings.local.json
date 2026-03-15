@@ -6,7 +6,13 @@
       "Bash(mkdir:*)",
       "Bash(git init:*)",
       "Bash(echo $MVCAM_COMMON_RUNENV)",
-      "Read(//etc/profile.d/**)"
+      "Read(//etc/profile.d/**)",
+      "Bash(MVCAM_COMMON_RUNENV=/opt/MVS/lib venv/bin/python -c \"\nfrom recording_metadata import RecordingMetadata, CameraRecordingInfo\nfrom recording_manager import RecordingManager\nfrom camera_manager import CameraManager\nprint\\('All imports OK'\\)\n\")",
+      "Bash(fuser:*)",
+      "Bash(pgrep:*)",
+      "Bash(curl:*)",
+      "Bash(git checkout:*)",
+      "Bash(git add:*)"
     ]
   }
 }

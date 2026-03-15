@@ -20,6 +20,7 @@ sys.path.insert(0, MVS_SDK_PATH)
 from MvCameraControl_class import *
 
 from recording_manager import RecordingManager
+from recording_metadata import CameraRecordingInfo
 
 log = logging.getLogger("camera_manager")
 
@@ -56,6 +57,7 @@ class CameraInstance:
         self.is_open = False
         self.is_grabbing = False
         self.use_hb = True
+        self.trigger_mode = False  # False = free run, True = triggered
 
         self._latest_frame = None   # JPEG bytes
         self._latest_raw = None     # numpy array
@@ -123,8 +125,18 @@ class CameraInstance:
         self.cam = None
         log.info("Closed camera %s", self.ip)
 
+    def fire_software_trigger(self):
+        if not self.is_open:
+            raise RuntimeError(f"Camera {self.ip} not open")
+        if not self.trigger_mode:
+            raise RuntimeError(f"Camera {self.ip} is not in trigger mode")
+        ret = self.cam.MV_CC_SetCommandValue("TriggerSoftware")
+        if ret != MV_OK:
+            raise RuntimeError(f"TriggerSoftware failed for {self.ip}: 0x{ret:08X}")
+
     def configure(self, exposure_us=None, gain=None, frame_rate=None,
-                  use_hb=None, gain_auto=None, exposure_auto=None):
+                  use_hb=None, gain_auto=None, exposure_auto=None,
+                  trigger_mode=None):
         if not self.is_open:
             raise RuntimeError(f"Camera {self.ip} not open")
 
@@ -172,6 +184,20 @@ class CameraInstance:
             if was_grabbing:
                 self.start_grabbing()
                 needs_restart = False  # already restarted
+
+        # Trigger mode — can be changed while grabbing
+        if trigger_mode is not None:
+            if trigger_mode:
+                self.cam.MV_CC_SetEnumValue("TriggerSource", MV_TRIGGER_SOURCE_SOFTWARE)
+            ret = self.cam.MV_CC_SetEnumValue(
+                "TriggerMode", MV_TRIGGER_MODE_ON if trigger_mode else MV_TRIGGER_MODE_OFF
+            )
+            if ret == MV_OK:
+                self.trigger_mode = trigger_mode
+                log.info("Camera %s: TriggerMode = %s", self.ip,
+                         "On (software)" if trigger_mode else "Off (free run)")
+            else:
+                log.warning("Camera %s: set TriggerMode failed 0x%08X", self.ip, ret)
 
         if needs_restart:
             self.start_grabbing()
@@ -345,6 +371,7 @@ class CameraInstance:
             "is_open": self.is_open,
             "is_grabbing": self.is_grabbing,
             "use_hb": self.use_hb,
+            "trigger_mode": self.trigger_mode,
             "acq_fps": round(self._acq_fps, 2),
             "frame_count": self._frame_count,
             "lost_packets": self._lost_packets,
@@ -423,7 +450,24 @@ class CameraManager:
                 if not self._cameras[cid].is_grabbing:
                     raise RuntimeError(f"Camera {cid} is not grabbing")
 
-        recording_id, queues = self._recording_manager.start(camera_ids)
+        # Capture current camera params for metadata
+        camera_infos = []
+        for cid in camera_ids:
+            cam = self._cameras[cid]
+            params = cam.get_parameters()
+            info = CameraRecordingInfo(
+                camera_id=cid,
+                model=cam.model,
+                serial=cam.serial,
+                parameters={
+                    k: v["current"] if isinstance(v, dict) else v
+                    for k, v in params.items()
+                    if not k.startswith("_")
+                },
+            )
+            camera_infos.append(info)
+
+        recording_id, queues = self._recording_manager.start(camera_ids, camera_infos)
         for cid, q in queues.items():
             self._cameras[cid]._record_queue = q
         return recording_id
