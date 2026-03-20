@@ -32,4 +32,3 @@ Thumbs.db
 # Scrap/scratch
 scrap/
 first/
-$(ALLUSERSPROFILE)

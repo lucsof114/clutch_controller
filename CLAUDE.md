@@ -29,10 +29,14 @@ templates/index.html  — Web UI (cameras tab + recordings tab, self-contained)
 ## SDK notes
 
 - Python bindings: `/opt/MVS/Samples/64/Python/MvImport`
-- HB pixel format constant: `0x81080001` (`PixelType_Gvsp_HB_Mono8`) — NOT `0x80080001`
-- HB mode not currently supported by camera firmware (serial DA9128029) — firmware update requested from Hikrobot
-- Camera is 1GigE PHY → max ~24 fps at 2448×2048 Mono8 (bandwidth ceiling, not software limit)
-- `AcquisitionFrameRateEnable` must be disabled to allow the camera to run at its native max fps
+- HB lossless compression setup (required order):
+  1. `PixelFormat = Mono8` (must be 8-bit first)
+  2. `ImageCompressionMode = HB` (enum value 2)
+  3. `HighBandwidthMode = Burst` (enum value 1) — critical: tells camera to use compressed bandwidth for rate calc
+- With HB Burst: ~35 fps at full 2448×2048 over 1GigE (~3.4x compression ratio)
+- Without HB: max ~24 fps at 2448×2048 Mono8 (1GigE bandwidth ceiling)
+- Frames arrive with HB pixel type (bit 31 set) and must be decoded via `MV_CC_HBDecode`
+- `AcquisitionFrameRateEnable` must be disabled to allow the camera to run at its natural sensor maximum
 
 ## Recording design
 

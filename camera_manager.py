@@ -24,7 +24,6 @@ from recording_metadata import CameraRecordingInfo, SyncMetadata
 
 log = logging.getLogger("camera_manager")
 
-HB_MONO8 = 0x81080001  # PixelType_Gvsp_HB_Mono8 from SDK PixelType_header.py
 MONO8 = 0x01080001
 
 
@@ -95,18 +94,19 @@ class CameraInstance:
         # Free-run mode
         self.cam.MV_CC_SetEnumValue("TriggerMode", MV_TRIGGER_MODE_OFF)
 
-        # Apply pixel format — attempt HB_Mono8 for higher throughput, fall back to Mono8
+        # Pixel format: always start with Mono8, then enable HB compression
+        self.cam.MV_CC_SetEnumValue("PixelFormat", MONO8)
+
         if self.use_hb:
-            ret = self.cam.MV_CC_SetEnumValue("PixelFormat", HB_MONO8)
+            ret = self.cam.MV_CC_SetEnumValue("ImageCompressionMode", 2)  # HB
             if ret == MV_OK:
-                log.info("Camera %s: PixelFormat = HB_Mono8 (compressed, higher fps)", self.ip)
+                # Burst mode: tells camera to use compressed bandwidth for rate calc
+                self.cam.MV_CC_SetEnumValue("HighBandwidthMode", 1)  # Burst
+                log.info("Camera %s: HB Burst compression enabled (~35 fps capable)", self.ip)
             else:
-                log.warning("Camera %s: HB_Mono8 not supported (0x%08X) — using Mono8; "
+                log.warning("Camera %s: HB compression not supported (0x%08X) — "
                             "max fps will be ~24 on 1GigE link", self.ip, ret)
-                self.cam.MV_CC_SetEnumValue("PixelFormat", MONO8)
                 self.use_hb = False
-        else:
-            self.cam.MV_CC_SetEnumValue("PixelFormat", MONO8)
 
         # Disable software frame rate cap so camera runs at its natural sensor maximum
         self.cam.MV_CC_SetBoolValue("AcquisitionFrameRateEnable", False)
@@ -133,18 +133,24 @@ class CameraInstance:
 
         needs_restart = False
 
-        # Pixel format change requires stop/start
+        # HB compression toggle requires stop/start
         if use_hb is not None and use_hb != self.use_hb:
             needs_restart = self.is_grabbing
             if needs_restart:
                 self.stop_grabbing()
-            fmt = HB_MONO8 if use_hb else MONO8
-            ret = self.cam.MV_CC_SetEnumValue("PixelFormat", fmt)
-            if ret == MV_OK:
-                self.use_hb = use_hb
-                log.info("Camera %s pixel format: %s", self.ip, "HB_Mono8" if use_hb else "Mono8")
+            if use_hb:
+                self.cam.MV_CC_SetEnumValue("PixelFormat", MONO8)
+                ret = self.cam.MV_CC_SetEnumValue("ImageCompressionMode", 2)  # HB
+                if ret == MV_OK:
+                    self.cam.MV_CC_SetEnumValue("HighBandwidthMode", 1)  # Burst
+                    self.use_hb = True
+                    log.info("Camera %s: HB Burst compression enabled", self.ip)
+                else:
+                    log.warning("Camera %s: HB compression failed 0x%08X", self.ip, ret)
             else:
-                log.warning("Camera %s: set pixel format failed 0x%08X", self.ip, ret)
+                self.cam.MV_CC_SetEnumValue("ImageCompressionMode", 0)  # Off
+                self.use_hb = False
+                log.info("Camera %s: HB compression disabled", self.ip)
 
         # Exposure auto mode
         if exposure_auto is not None:
