@@ -78,7 +78,8 @@ class TriggerController:
         """Send a command and return the response."""
         if not self.ser or not self.ser.is_open:
             raise RuntimeError("Not connected")
-        
+
+        self.ser.reset_input_buffer()
         self.ser.write(f"{command}\n".encode())
         response = self.ser.readline().decode().strip()
         return response

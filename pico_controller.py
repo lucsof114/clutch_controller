@@ -1,0 +1,321 @@
+"""
+PicoController — PicoScope edge-detection controller for sync signal validation.
+
+Producer-consumer architecture:
+- Poll thread (daemon) runs continuously between open() and close()
+- start_tracking/stop_tracking can be called multiple times within one session
+- Callback + _active_callback module-level ref to prevent GC
+
+Requires: LD_PRELOAD=/opt/picoscope/lib/libpicoipp.so
+"""
+
+from __future__ import annotations
+
+import ctypes
+from ctypes import c_int16, c_int32, c_uint32, CFUNCTYPE, POINTER
+import logging
+import queue
+import threading
+import time
+from dataclasses import dataclass, field
+
+import numpy as np
+from picosdk.ps2000 import ps2000
+
+log = logging.getLogger("pico_controller")
+
+# ── Constants ────────────────────────────────────────────────────────────────
+SAMPLE_INTERVAL_US = 10
+OVERVIEW_SIZE = 15000
+SAMPLES_PER_SEC = 1_000_000 / SAMPLE_INTERVAL_US
+THRESHOLD_ADC = int(3.0 * 32767.0 / 10.0)  # 3V threshold in ±10V range
+FRAME_TOLERANCE_US = 15.0
+
+CALLBACK_TYPE = CFUNCTYPE(
+    None, POINTER(POINTER(c_int16)), c_int16, c_uint32, c_int16, c_int16, c_uint32
+)
+
+_SHUTDOWN = None
+_active_callback = None
+
+
+# ── Result dataclass ─────────────────────────────────────────────────────────
+@dataclass
+class SyncResult:
+    edge_count: int
+    timestamps_us: list[float]
+    timing_ok: bool
+    worst_error_us: float
+    fault_intervals: list[dict]
+    interval_stats: dict | None = None
+    total_samples: int = 0
+
+
+# ── Internal data structures ─────────────────────────────────────────────────
+@dataclass
+class _Chunk:
+    data: np.ndarray
+
+
+@dataclass
+class _ProcessingState:
+    freq_hz: float
+    edge_timestamps: list = field(default_factory=list)   # absolute sample indices
+    total_samples: int = 0
+    was_above: bool = False                               # previous sample was above threshold
+    seen_high: bool = False                               # have we ever seen the signal go high?
+
+
+# ── Core algorithm: find falling edge, compute time delta ────────────────────
+def _process_chunk(chunk: _Chunk, state: _ProcessingState):
+    arr = chunk.data
+    n = len(arr)
+    if n == 0:
+        return
+
+    above = arr >= THRESHOLD_ADC
+    below = ~above
+    base = state.total_samples
+
+    # Must see a high sample before we can count any falling edge
+    if not state.seen_high:
+        first_high = np.nonzero(above)[0]
+        if len(first_high) == 0:
+            # Entire chunk is low — skip, no edges possible
+            state.total_samples += n
+            return
+        # Start processing from the first high sample onward
+        start = int(first_high[0])
+        state.seen_high = True
+        state.was_above = True
+        if start + 1 >= n:
+            # Only the last sample was high, nothing to detect yet
+            state.total_samples += n
+            return
+        arr = arr[start:]
+        above = above[start:]
+        below = below[start:]
+        base = state.total_samples + start
+        n = len(arr)
+
+    # Detect falling edges: current sample below threshold, previous was above
+    prev = np.empty(n + 1, dtype=bool)
+    prev[0] = not state.was_above
+    prev[1:] = below
+    falling = below & ~prev[:-1]
+
+    for idx in np.nonzero(falling)[0]:
+        state.edge_timestamps.append(base + int(idx))
+
+    state.was_above = not below[-1]
+    state.total_samples = base + n
+
+
+def _worker_loop(q: queue.Queue, state: _ProcessingState, stop_event: threading.Event):
+    while True:
+        try:
+            chunk = q.get(timeout=0.05)
+        except queue.Empty:
+            if stop_event.is_set():
+                while not q.empty():
+                    chunk = q.get_nowait()
+                    if chunk is _SHUTDOWN:
+                        return
+                    _process_chunk(chunk, state)
+                return
+            continue
+
+        if chunk is _SHUTDOWN:
+            return
+
+        _process_chunk(chunk, state)
+
+
+def _make_callback(q: queue.Queue):
+    def cb(overviewBuffers, overflow, triggeredAt, triggered, auto_stop, nValues):
+        n = int(nValues)
+        if n <= 0 or not overviewBuffers:
+            return
+        ptr = overviewBuffers[0]
+        if not ptr:
+            return
+        arr = np.ctypeslib.as_array(ptr, shape=(n,)).copy()
+        q.put(_Chunk(data=arr))
+    return cb
+
+
+# ── PicoController ───────────────────────────────────────────────────────────
+class PicoController:
+    def __init__(self):
+        self._handle: int = 0
+        self._is_open = False
+        self._is_tracking = False
+
+        self._poll_thread: threading.Thread | None = None
+        self._poll_stop = threading.Event()
+
+        self._worker_thread: threading.Thread | None = None
+        self._worker_stop = threading.Event()
+        self._queue: queue.Queue | None = None
+        self._state: _ProcessingState | None = None
+        self._freq_hz: float = 0.0
+        self._c_cb = None
+
+    @property
+    def is_open(self) -> bool:
+        return self._is_open
+
+    @property
+    def is_tracking(self) -> bool:
+        return self._is_tracking
+
+    def open(self):
+        """Open device, configure channels, start streaming, start poll thread."""
+        if self._is_open:
+            return
+
+        handle = ps2000._open_unit()
+        if handle <= 0:
+            raise RuntimeError(f"PicoScope open failed: {handle}")
+        self._handle = handle
+
+        ps2000._set_channel(c_int16(handle), c_int16(0), c_int16(1), c_int16(1), c_int16(9))  # Ch A, DC, ±10V
+        ps2000._set_channel(c_int16(handle), c_int16(1), c_int16(0), c_int16(1), c_int16(9))  # Ch B off
+        ps2000._set_trigger(c_int16(handle), c_int16(5), c_int16(0), c_int16(0), c_int16(0), c_int16(0))
+
+        status = ps2000._run_streaming_ns(
+            c_int16(handle), c_uint32(SAMPLE_INTERVAL_US), c_int32(3),
+            c_uint32(100000), c_int16(0), c_uint32(1), c_uint32(OVERVIEW_SIZE),
+        )
+        if status != 1:
+            ps2000._close_unit(c_int16(handle))
+            raise RuntimeError(f"PicoScope streaming start failed: {status}")
+
+        self._queue = queue.Queue(maxsize=0)
+        raw_cb = _make_callback(self._queue)
+        self._c_cb = CALLBACK_TYPE(raw_cb)
+        global _active_callback
+        _active_callback = self._c_cb
+
+        self._poll_stop.clear()
+        self._poll_thread = threading.Thread(target=self._poll_loop, daemon=True)
+        self._poll_thread.start()
+
+        self._is_open = True
+        log.info("PicoScope opened and streaming (handle=%d)", handle)
+
+    def close(self):
+        """Stop streaming, close device."""
+        if not self._is_open:
+            return
+
+        if self._is_tracking:
+            self.stop_tracking()
+
+        self._poll_stop.set()
+        if self._poll_thread:
+            self._poll_thread.join(timeout=3.0)
+            self._poll_thread = None
+
+        ps2000._stop(c_int16(self._handle))
+        ps2000._close_unit(c_int16(self._handle))
+
+        global _active_callback
+        _active_callback = None
+        self._c_cb = None
+        self._queue = None
+        self._handle = 0
+        self._is_open = False
+        log.info("PicoScope closed")
+
+    def start_tracking(self, freq_hz: float):
+        """Start worker thread to detect falling edges."""
+        if not self._is_open:
+            raise RuntimeError("PicoScope not open")
+        if self._is_tracking:
+            raise RuntimeError("Already tracking")
+
+        self._freq_hz = freq_hz
+        self._state = _ProcessingState(freq_hz=freq_hz)
+        self._worker_stop.clear()
+        self._worker_thread = threading.Thread(
+            target=_worker_loop,
+            args=(self._queue, self._state, self._worker_stop),
+            daemon=True,
+        )
+        self._worker_thread.start()
+        self._is_tracking = True
+        log.info("PicoScope tracking started at %.1f Hz", freq_hz)
+
+    def stop_tracking(self) -> SyncResult:
+        """Stop worker, compute timing from collected edge timestamps."""
+        if not self._is_tracking:
+            raise RuntimeError("Not tracking")
+
+        self._worker_stop.set()
+        self._queue.put(_SHUTDOWN)
+        if self._worker_thread:
+            self._worker_thread.join(timeout=5.0)
+            self._worker_thread = None
+
+        self._is_tracking = False
+
+        state = self._state
+        timestamps_us = [t * SAMPLE_INTERVAL_US for t in state.edge_timestamps]
+
+        # Compute time deltas and validate
+        timing_ok = True
+        worst_error_us = 0.0
+        fault_intervals = []
+        interval_stats = None
+
+        if len(state.edge_timestamps) > 1:
+            intervals = np.diff(np.array(state.edge_timestamps, dtype=float)) * SAMPLE_INTERVAL_US
+            expected_us = 1_000_000.0 / self._freq_hz
+            errors = np.abs(intervals - expected_us)
+            worst_error_us = float(errors.max())
+
+            if worst_error_us > FRAME_TOLERANCE_US:
+                timing_ok = False
+                for i in np.nonzero(errors > FRAME_TOLERANCE_US)[0]:
+                    if len(fault_intervals) >= 10:
+                        break
+                    fault_intervals.append({
+                        'edge_num': int(i + 1),
+                        'measured_us': float(intervals[i]),
+                        'expected_us': expected_us,
+                        'error_us': float(errors[i]),
+                    })
+
+            interval_stats = {
+                'mean': float(intervals.mean()),
+                'std': float(intervals.std()),
+                'min': float(intervals.min()),
+                'max': float(intervals.max()),
+                'expected': expected_us,
+            }
+
+        result = SyncResult(
+            edge_count=len(state.edge_timestamps),
+            timestamps_us=timestamps_us,
+            timing_ok=timing_ok,
+            worst_error_us=worst_error_us,
+            fault_intervals=fault_intervals,
+            interval_stats=interval_stats,
+            total_samples=state.total_samples,
+        )
+
+        log.info("PicoScope tracking stopped: %d edges, timing_ok=%s, worst_error=%.1f us",
+                 result.edge_count, result.timing_ok, result.worst_error_us)
+        self._state = None
+        return result
+
+    def _poll_loop(self):
+        h = c_int16(self._handle)
+        cb = self._c_cb
+        while not self._poll_stop.is_set():
+            try:
+                ps2000._get_streaming_last_values(h, cb)
+            except Exception as e:
+                log.warning("PicoScope poll error: %s", e)
+            time.sleep(0.005)

@@ -11,7 +11,7 @@ from typing import Optional
 
 import cv2
 
-from recording_metadata import CameraRecordingInfo, RecordingMetadata
+from recording_metadata import CameraRecordingInfo, RecordingMetadata, SyncMetadata
 
 RECORDING_BASE = Path.home() / "Documents" / "clutch" / "clutch_db"
 CATALOG_DIR    = RECORDING_BASE / "catalog"
@@ -63,8 +63,9 @@ class RecordingManager:
         self._size_bytes = {}
 
         # Build camera_id → serial lookup for directory naming
-        serial_map = {info.camera_id: info.serial or info.camera_id
-                      for info in camera_infos}
+        self._serial_map = {info.camera_id: info.serial or info.camera_id
+                            for info in camera_infos}
+        serial_map = self._serial_map
 
         for cid in camera_ids:
             q: queue.Queue = queue.Queue(maxsize=QUEUE_MAXSIZE)
@@ -87,7 +88,7 @@ class RecordingManager:
         log.info("Recording started: %s  cameras=%s", recording_id, camera_ids)
         return recording_id, dict(self._queues)
 
-    def stop(self) -> dict:
+    def stop(self, sync: SyncMetadata | None = None, warnings: list[str] | None = None) -> dict:
         if not self.is_recording:
             raise RuntimeError("Not recording")
 
@@ -101,9 +102,29 @@ class RecordingManager:
             t.join()
             log.info("Saver thread joined for %s", cid)
 
+        # Discard first frame from each camera (garbage from trigger arming)
+        rec_dir = RECORDING_BASE / recording_id
+        for cid in self._saver_threads:
+            dir_name = self._serial_map.get(cid, cid)
+            first_frame_dir = rec_dir / dir_name / _make_frame_id(0)
+            if first_frame_dir.exists():
+                import shutil
+                try:
+                    sz = sum(f.stat().st_size for f in first_frame_dir.iterdir())
+                    shutil.rmtree(first_frame_dir)
+                    self._frame_counts[cid] = max(self._frame_counts.get(cid, 0) - 1, 0)
+                    self._size_bytes[cid] = max(self._size_bytes.get(cid, 0) - sz, 0)
+                    log.info("Discarded first frame for %s", cid)
+                except Exception as e:
+                    log.warning("Failed to discard first frame for %s: %s", cid, e)
+
         # Finalise and persist metadata
         if self._metadata is not None:
             self._metadata.finalise(self._frame_counts, self._size_bytes)
+            if sync is not None:
+                self._metadata.sync = sync
+            if warnings:
+                self._metadata.warnings = warnings
             rec_dir = RECORDING_BASE / recording_id
             self._metadata.save(rec_dir)
             # Mirror to catalog as a flat <recording_id>.json

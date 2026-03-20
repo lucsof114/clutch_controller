@@ -20,7 +20,7 @@ sys.path.insert(0, MVS_SDK_PATH)
 from MvCameraControl_class import *
 
 from recording_manager import RecordingManager
-from recording_metadata import CameraRecordingInfo
+from recording_metadata import CameraRecordingInfo, SyncMetadata
 
 log = logging.getLogger("camera_manager")
 
@@ -125,15 +125,6 @@ class CameraInstance:
         self.cam = None
         log.info("Closed camera %s", self.ip)
 
-    def fire_software_trigger(self):
-        if not self.is_open:
-            raise RuntimeError(f"Camera {self.ip} not open")
-        if not self.trigger_mode:
-            raise RuntimeError(f"Camera {self.ip} is not in trigger mode")
-        ret = self.cam.MV_CC_SetCommandValue("TriggerSoftware")
-        if ret != MV_OK:
-            raise RuntimeError(f"TriggerSoftware failed for {self.ip}: 0x{ret:08X}")
-
     def configure(self, exposure_us=None, gain=None, frame_rate=None,
                   use_hb=None, gain_auto=None, exposure_auto=None,
                   trigger_mode=None):
@@ -185,17 +176,17 @@ class CameraInstance:
                 self.start_grabbing()
                 needs_restart = False  # already restarted
 
-        # Trigger mode — can be changed while grabbing
+        # Trigger mode — "line0" for hardware trigger, False for free run
         if trigger_mode is not None:
-            if trigger_mode:
-                self.cam.MV_CC_SetEnumValue("TriggerSource", MV_TRIGGER_SOURCE_SOFTWARE)
+            if trigger_mode == "line0":
+                self.cam.MV_CC_SetEnumValue("TriggerSource", MV_TRIGGER_SOURCE_LINE0)
             ret = self.cam.MV_CC_SetEnumValue(
                 "TriggerMode", MV_TRIGGER_MODE_ON if trigger_mode else MV_TRIGGER_MODE_OFF
             )
             if ret == MV_OK:
                 self.trigger_mode = trigger_mode
                 log.info("Camera %s: TriggerMode = %s", self.ip,
-                         "On (software)" if trigger_mode else "Off (free run)")
+                         "On (line0)" if trigger_mode else "Off (free run)")
             else:
                 log.warning("Camera %s: set TriggerMode failed 0x%08X", self.ip, ret)
 
@@ -472,10 +463,11 @@ class CameraManager:
             self._cameras[cid]._record_queue = q
         return recording_id
 
-    def stop_recording(self) -> dict:
+    def stop_recording(self, sync: SyncMetadata | None = None,
+                        warnings: list[str] | None = None) -> dict:
         for cam in self._cameras.values():
             cam._record_queue = None
-        return self._recording_manager.stop()
+        return self._recording_manager.stop(sync=sync, warnings=warnings)
 
     def shutdown(self):
         if self._recording_manager.is_recording:

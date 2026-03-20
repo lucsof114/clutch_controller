@@ -78,6 +78,17 @@ header {
 .header-sep { flex: 1; }
 #cam-count { font-size: 11px; color: var(--text3); font-family: var(--font-mono); margin-right: 16px; }
 
+/* Studio controls */
+.studio-area {
+  display: flex; align-items: center; gap: 8px;
+  padding-right: 14px;
+  margin-right: 14px;
+  border-right: 1px solid var(--border);
+}
+.studio-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text3); transition: background 0.2s; }
+.studio-dot.connected { background: var(--green); box-shadow: 0 0 5px var(--green); }
+.studio-label { font-family: var(--font-mono); font-size: 10px; color: var(--text3); white-space: nowrap; }
+.studio-label.connected { color: var(--text2); }
 /* Recording controls */
 .rec-area { display: flex; align-items: center; gap: 10px; }
 #rec-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text3); transition: background 0.2s; }
@@ -236,53 +247,6 @@ input[type=range]:disabled { opacity: 0.25; cursor: not-allowed; }
 .p-input.dirty { border-color: var(--amber); }
 .p-input:disabled { opacity: 0.25; cursor: not-allowed; }
 
-.trigger-row {
-  display: grid;
-  grid-template-columns: 68px 1fr 68px;
-  align-items: center;
-  gap: 8px;
-  margin-top: 2px;
-}
-
-.trigger-seg {
-  display: flex;
-  background: var(--surface2);
-  border: 1px solid var(--border2);
-  border-radius: 4px;
-  overflow: hidden;
-}
-.seg-btn {
-  flex: 1; padding: 4px 0;
-  background: transparent;
-  border: none;
-  color: var(--text2);
-  font-size: 11px; font-weight: 500;
-  cursor: pointer;
-  transition: background 0.12s, color 0.12s;
-}
-.seg-btn:hover:not(:disabled) { background: var(--surface3); color: var(--text); }
-.seg-btn.active { background: var(--surface3); color: var(--text); }
-.seg-btn:disabled { opacity: 0.3; cursor: not-allowed; }
-/* Triggered-active style */
-.trigger-seg:has(.seg-btn.active:last-child) .seg-btn.active {
-  background: rgba(59,130,246,0.15); color: var(--accent);
-}
-
-.fire-btn {
-  padding: 4px 8px;
-  background: rgba(59,130,246,0.1);
-  border: 1px solid rgba(59,130,246,0.3);
-  border-radius: 4px;
-  color: var(--accent);
-  font-size: 11px; font-weight: 600;
-  cursor: pointer;
-  transition: background 0.12s, border-color 0.12s;
-  white-space: nowrap;
-}
-.fire-btn:hover:not(:disabled) { background: rgba(59,130,246,0.2); border-color: var(--accent); }
-.fire-btn:disabled { opacity: 0.3; cursor: not-allowed; }
-.fire-btn:active:not(:disabled) { background: rgba(59,130,246,0.35); }
-
 .params-footer { margin-top: 11px; display: flex; justify-content: flex-end; }
 .apply-btn {
   padding: 4px 14px; border-radius: 4px;
@@ -423,6 +387,10 @@ input[type=range]:disabled { opacity: 0.25; cursor: not-allowed; }
   </nav>
   <div class="header-sep"></div>
   <span id="cam-count"></span>
+  <div class="studio-area">
+    <div class="studio-dot" id="studio-dot"></div>
+    <span class="studio-label" id="studio-label">studio</span>
+  </div>
   <div class="rec-area">
     <div id="rec-dot"></div>
     <span id="rec-label">idle</span>
@@ -450,6 +418,7 @@ const cameras   = {};     // ip → status
 const paramState = {};    // ip → { exposure, gain, frameRate, dirty }
 const paused    = new Set(); // IPs with stream display paused
 let isRecording = false;
+let studioConnected = false;
 let currentTab  = 'cameras';
 
 // ── Tab switching ─────────────────────────────────────────────────────────
@@ -557,20 +526,6 @@ function renderCard(ip) {
         ${pRow(ip, 'exposure',  'Exposure',   exp, 15, 100000, 'log', 'µs',  dis)}
         ${pRow(ip, 'gain',      'Gain',        gn,  0,  23.98, 'lin', 'dB',  dis)}
         ${pRow(ip, 'frameRate', 'Frame Rate',  fr,  1,  35,    'lin', 'fps', dis)}
-        <div class="trigger-row">
-          <span class="p-label" style="text-align:right;font-size:11px;color:var(--text2)">Trigger</span>
-          <div class="trigger-seg ${dis}" id="trigseg-${id}">
-            <button class="seg-btn ${!cam.trigger_mode ? 'active' : ''}"
-              onclick="setTriggerMode('${ip}', false)" ${dis}>Free Run</button>
-            <button class="seg-btn ${cam.trigger_mode ? 'active' : ''}"
-              onclick="setTriggerMode('${ip}', true)" ${dis}>Triggered</button>
-          </div>
-          <button class="fire-btn" id="firebtn-${id}"
-            onclick="fireTrigger('${ip}')"
-            style="${cam.trigger_mode ? '' : 'visibility:hidden'}" ${!cam.trigger_mode || !cam.is_grabbing ? 'disabled' : ''}>
-            &#9654; Fire
-          </button>
-        </div>
         <div class="params-footer">
           <button class="apply-btn" id="apply-${id}" onclick="submitParams('${ip}')" ${dis}>Apply</button>
         </div>
@@ -731,12 +686,30 @@ async function pollStats() {
   }
 }
 
-// ── Recording ─────────────────────────────────────────────────────────────
+// ── Recording (always studio) ─────────────────────────────────────────────
+async function ensureStudioConnected() {
+  if (studioConnected) return true;
+  document.getElementById('rec-label').textContent = 'connecting…';
+  const res = await api('/api/studio/connect', 'POST');
+  if (res.ok) {
+    studioConnected = true;
+    document.getElementById('studio-dot').classList.add('connected');
+    document.getElementById('studio-label').classList.add('connected');
+    return true;
+  }
+  alert('Studio connect failed: ' + res.error);
+  document.getElementById('rec-label').textContent = 'idle';
+  return false;
+}
+
 async function toggleRecording() {
   const btn = document.getElementById('btn-rec');
   btn.disabled = true;
   if (!isRecording) {
-    const res = await api('/api/recordings/start', 'POST');
+    if (!(await ensureStudioConnected())) { btn.disabled = false; return; }
+    const ips = Object.keys(paramState);
+    const freq = ips.length ? (paramState[ips[0]].frameRate || 30) : 30;
+    const res = await api('/api/studio/start', 'POST', { frequency_hz: freq });
     if (res.ok) {
       isRecording = true;
       document.getElementById('rec-dot').classList.add('active');
@@ -745,12 +718,19 @@ async function toggleRecording() {
     } else { alert('Start recording failed: ' + res.error); }
   } else {
     document.getElementById('rec-label').textContent = 'stopping…';
-    const res = await api('/api/recordings/stop', 'POST');
+    const res = await api('/api/studio/stop', 'POST');
     if (res.ok) {
       isRecording = false;
       document.getElementById('rec-dot').classList.remove('active');
       const total = Object.values(res.frame_counts || {}).reduce((a,b)=>a+b,0);
-      document.getElementById('rec-label').textContent = `saved · ${total} frames`;
+      let label = `saved · ${total} frames`;
+      if (res.sync && res.sync.timing_ok != null) {
+        label += res.sync.timing_ok ? ' · sync OK' : ' · sync FAULT';
+      }
+      if (res.warnings && res.warnings.length) {
+        label += ` · ${res.warnings.length} warning${res.warnings.length > 1 ? 's' : ''}`;
+      }
+      document.getElementById('rec-label').textContent = label;
       btn.textContent = '●\u00a0Record'; btn.className = 'btn primary';
     } else {
       alert('Stop recording failed: ' + res.error);
@@ -891,29 +871,6 @@ function fmtBytes(b) {
   return (b/1073741824).toFixed(2) + ' GB';
 }
 
-async function setTriggerMode(ip, enabled) {
-  const id = ip.replace(/\./g, '-');
-  // Optimistic UI update
-  const seg = document.getElementById('trigseg-' + id);
-  seg?.querySelectorAll('.seg-btn').forEach((b, i) => b.classList.toggle('active', i === (enabled ? 1 : 0)));
-  const fireBtn = document.getElementById('firebtn-' + id);
-  if (fireBtn) { fireBtn.style.visibility = enabled ? '' : 'hidden'; fireBtn.disabled = !enabled; }
-
-  await api(`/api/cameras/${ip}/parameters`, 'POST', { trigger_mode: enabled });
-
-  // Sync true state back
-  const updated = await api('/api/cameras');
-  updated.forEach(c => { cameras[c.ip] = c; });
-}
-
-async function fireTrigger(ip) {
-  const id  = ip.replace(/\./g, '-');
-  const btn = document.getElementById('firebtn-' + id);
-  if (btn) btn.disabled = true;
-  await api(`/api/cameras/${ip}/trigger`, 'POST');
-  if (btn) { btn.disabled = false; }
-}
-
 async function deleteRecording(event, recordingId) {
   event.stopPropagation(); // don't toggle the expand
   if (!confirm(`Delete recording ${recordingId}?\nThis cannot be undone.`)) return;
@@ -925,9 +882,29 @@ async function deleteRecording(event, recordingId) {
   }
 }
 
+// ── Studio status poll ────────────────────────────────────────────────────
+async function pollStudioStatus() {
+  try {
+    const s = await api('/api/studio/status');
+    studioConnected = s.arduino_connected && s.pico_open;
+    const dot = document.getElementById('studio-dot');
+    const label = document.getElementById('studio-label');
+    dot.classList.toggle('connected', studioConnected);
+    label.classList.toggle('connected', studioConnected);
+    if (s.recording && !isRecording) {
+      isRecording = true;
+      document.getElementById('rec-dot').classList.add('active');
+      document.getElementById('btn-rec').textContent = '■\u00a0Stop';
+      document.getElementById('btn-rec').className = 'btn danger';
+    }
+  } catch(e) {}
+}
+
 // ── Boot ──────────────────────────────────────────────────────────────────
 init();
+pollStudioStatus();
 setInterval(pollStats, 2000);
+setInterval(pollStudioStatus, 3000);
 </script>
 </body>
 </html>

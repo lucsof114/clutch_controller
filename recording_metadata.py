@@ -27,12 +27,27 @@ class CameraRecordingInfo:
 
 
 @dataclass
+class SyncMetadata:
+    frequency_hz: float
+    edge_count: int
+    timing_ok: bool
+    worst_error_us: float
+    fault_intervals: list = field(default_factory=list)
+    interval_stats: dict | None = None
+    timestamps_us: list = field(default_factory=list)
+    sample_interval_us: float = 10.0
+    total_samples: int = 0
+
+
+@dataclass
 class RecordingMetadata:
     recording_id: str
     start_time: str                          # ISO 8601 UTC
     end_time: Optional[str] = None           # ISO 8601 UTC, set on stop
     duration_seconds: Optional[float] = None
     cameras: list[CameraRecordingInfo] = field(default_factory=list)
+    sync: SyncMetadata | None = None
+    warnings: list[str] = field(default_factory=list)
 
     # ── factory ──────────────────────────────────────────────────────────────
 
@@ -70,4 +85,7 @@ class RecordingMetadata:
     def load(cls, directory: Path) -> "RecordingMetadata":
         d = json.loads((directory / "metadata.json").read_text())
         cameras = [CameraRecordingInfo(**c) for c in d.pop("cameras", [])]
-        return cls(**d, cameras=cameras)
+        sync_data = d.pop("sync", None)
+        sync = SyncMetadata(**sync_data) if sync_data else None
+        warnings = d.pop("warnings", [])
+        return cls(**d, cameras=cameras, sync=sync, warnings=warnings)

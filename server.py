@@ -11,13 +11,25 @@ from flask import Flask, jsonify, request, Response, render_template
 
 from camera_manager import CameraManager
 from recording_manager import CATALOG_DIR
+from studio_controller import StudioController
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
 log = logging.getLogger("server")
 
 app = Flask(__name__)
 mgr = CameraManager()
-atexit.register(mgr.shutdown)
+studio = StudioController(mgr)
+
+
+def _shutdown():
+    try:
+        studio.disconnect()
+    except Exception as e:
+        log.warning("Studio disconnect on shutdown: %s", e)
+    mgr.shutdown()
+
+
+atexit.register(_shutdown)
 
 
 @app.route("/")
@@ -176,31 +188,24 @@ def delete_recording(recording_id):
 
 @app.route("/api/recordings/start", methods=["POST"])
 def start_recording():
+    """All recordings go through the studio pipeline."""
     data = request.get_json(silent=True) or {}
+    frequency_hz = data.get("frequency_hz", 30.0)
     camera_ids = data.get("camera_ids")
     try:
-        recording_id = mgr.start_recording(camera_ids)
+        recording_id = studio.start_recording(frequency_hz=frequency_hz,
+                                               camera_ids=camera_ids)
         return jsonify({"ok": True, "recording_id": recording_id})
-    except (RuntimeError, KeyError) as e:
+    except RuntimeError as e:
         return jsonify({"ok": False, "error": str(e)}), 400
 
 
 @app.route("/api/recordings/stop", methods=["POST"])
 def stop_recording():
     try:
-        result = mgr.stop_recording()
+        result = studio.stop_recording()
         return jsonify({"ok": True, **result})
     except RuntimeError as e:
-        return jsonify({"ok": False, "error": str(e)}), 400
-
-
-@app.route("/api/cameras/<camera_id>/trigger", methods=["POST"])
-def fire_trigger(camera_id):
-    try:
-        cam = mgr.get_camera(camera_id)
-        cam.fire_software_trigger()
-        return jsonify({"ok": True})
-    except (KeyError, RuntimeError) as e:
         return jsonify({"ok": False, "error": str(e)}), 400
 
 
@@ -215,6 +220,53 @@ def snapshot(camera_id):
         return Response(jpeg, mimetype="image/jpeg")
     except (KeyError, RuntimeError) as e:
         return str(e), 400
+
+
+# ── Studio routes ────────────────────────────────────────────────────────────
+
+@app.route("/api/studio/connect", methods=["POST"])
+def studio_connect():
+    try:
+        studio.connect()
+        return jsonify({"ok": True})
+    except RuntimeError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+
+@app.route("/api/studio/disconnect", methods=["POST"])
+def studio_disconnect():
+    try:
+        studio.disconnect()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+
+@app.route("/api/studio/start", methods=["POST"])
+def studio_start():
+    data = request.get_json(silent=True) or {}
+    frequency_hz = data.get("frequency_hz", 30.0)
+    camera_ids = data.get("camera_ids")
+    try:
+        recording_id = studio.start_recording(frequency_hz=frequency_hz,
+                                               camera_ids=camera_ids)
+        return jsonify({"ok": True, "recording_id": recording_id})
+    except RuntimeError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+
+@app.route("/api/studio/stop", methods=["POST"])
+def studio_stop():
+    try:
+        result = studio.stop_recording()
+        return jsonify({"ok": True, **result})
+    except RuntimeError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+
+@app.route("/api/studio/status")
+def studio_status():
+    return jsonify(studio.status())
 
 
 if __name__ == "__main__":
