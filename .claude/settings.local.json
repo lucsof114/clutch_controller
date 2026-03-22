@@ -12,7 +12,7 @@
       "Bash(pgrep:*)",
       "Bash(curl:*)",
       "Bash(git checkout:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
       "Bash(pip3 show:*)",
       "Bash(pip3 install:*)",
       "Bash(python3:*)"
