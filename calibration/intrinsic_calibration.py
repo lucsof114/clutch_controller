@@ -6,6 +6,7 @@ from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 
@@ -37,7 +38,7 @@ def rodrigues_to_matrix(rvec: torch.Tensor) -> torch.Tensor:
     k = rvec / safe_theta  # (B, 3)
 
     # batched skew-symmetric
-    zero = torch.zeros(B, dtype=rvec.dtype)
+    zero = torch.zeros(B, dtype=rvec.dtype, device=rvec.device)
     K = torch.stack([
         zero, -k[:, 2], k[:, 1],
         k[:, 2], zero, -k[:, 0],
@@ -46,7 +47,7 @@ def rodrigues_to_matrix(rvec: torch.Tensor) -> torch.Tensor:
 
     sin_t = torch.sin(safe_theta).unsqueeze(-1)   # (B, 1, 1)
     cos_t = torch.cos(safe_theta).unsqueeze(-1)
-    I = torch.eye(3, dtype=rvec.dtype).unsqueeze(0)
+    I = torch.eye(3, dtype=rvec.dtype, device=rvec.device).unsqueeze(0)
 
     R = I + sin_t * K + (1.0 - cos_t) * (K @ K)
 
@@ -221,11 +222,12 @@ def _compute_metrics(
     all_v = []
     all_zdist = []
 
+    dev = next(cam.parameters()).device
     with torch.no_grad():
         for fidx, obs in frame_data.items():
             fi = fidx_to_int[fidx]
             z_dist = float(board_poses.tvecs[fi, 2])
-            fi_tensor = torch.full((1,), fi, dtype=torch.long)
+            fi_tensor = torch.full((1,), fi, dtype=torch.long, device=dev)
 
             for pts_3d, pts_2d, ptype in [
                 (obs.charuco_pts_3d, obs.charuco_pts_2d, "charuco"),
@@ -233,15 +235,17 @@ def _compute_metrics(
             ]:
                 if pts_3d.shape[0] == 0:
                     continue
-                fi_batch = fi_tensor.expand(pts_3d.shape[0])
-                cam_pts = board_poses.transform(fi_batch, pts_3d)
+                pts_3d_dev = pts_3d.to(dev)
+                pts_2d_dev = pts_2d.to(dev)
+                fi_batch = fi_tensor.expand(pts_3d_dev.shape[0])
+                cam_pts = board_poses.transform(fi_batch, pts_3d_dev)
                 proj = cam.project_camera_points(cam_pts)
-                res = (proj - pts_2d).norm(dim=1)
+                res = (proj - pts_2d_dev).norm(dim=1)
 
-                all_residuals.append(res.numpy())
+                all_residuals.append(res.cpu().numpy())
                 all_types.extend([ptype] * len(res))
-                all_u.append(proj[:, 0].numpy())
-                all_v.append(proj[:, 1].numpy())
+                all_u.append(proj[:, 0].cpu().numpy())
+                all_v.append(proj[:, 1].cpu().numpy())
                 all_zdist.extend([z_dist] * len(res))
 
     residuals = np.concatenate(all_residuals)
@@ -337,11 +341,28 @@ def run_intrinsic_calibration(
     board_name: Optional[str] = None,
     num_epochs: int = 500,
     max_workers: int = 40,
+    device: Optional[str] = None,
+    lr_cam: float = 0.5,
+    lr_dist: float = 0.01,
+    lr_poses: float = 0.003,
+    huber_charuco_delta: float = 0.5,
+    huber_aruco_delta: float = 3.0,
+    batch_size: int = 100000,
+    aruco_weight: float = 1.0,
+    detections_df: Optional[pd.DataFrame] = None,
 ) -> dict:
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    dev = torch.device(device)
+    print(f"Using device: {dev}")
+
     # -- Step A: Detection --------------------------------------------------
-    detector = _load_board(board_name)
-    df = detector.detect_recording(recording_dir, camera_serial, camera_serial,
-                                   max_workers=max_workers)
+    if detections_df is not None:
+        df = detections_df
+    else:
+        detector = _load_board(board_name)
+        df = detector.detect_recording(recording_dir, camera_serial, camera_serial,
+                                       max_workers=max_workers)
     if df.empty:
         raise RuntimeError("No detections found")
 
@@ -364,6 +385,7 @@ def run_intrinsic_calibration(
         "dist_coeffs": [0.0, 0.0, 0.0, 0.0],
     }
     cam = TorchCam(camera_serial, intrinsics, torch.eye(4, dtype=torch.float64))
+    cam.to(dev)
     cam.pose.requires_grad_(False)
 
     camera_matrix = np.array([
@@ -403,6 +425,7 @@ def run_intrinsic_calibration(
     # -- Step D: Build dataset and dataloader --------------------------------
     fidx_to_int = {fidx: i for i, fidx in enumerate(fidx_order)}
     board_poses = BoardPoses(np.stack(rvec_list), np.stack(tvec_list))
+    board_poses.to(dev)
 
     # Flatten all observations: (frame_int, pt_3d[3], pt_2d[2], type)
     # type: 0=charuco, 1=aruco
@@ -423,27 +446,28 @@ def run_intrinsic_calibration(
             rows[:, 6] = ptype
             all_obs_rows.append(rows)
 
-    all_obs = torch.cat(all_obs_rows, dim=0)
+    all_obs = torch.cat(all_obs_rows, dim=0).to(dev)
     dataset = torch.utils.data.TensorDataset(all_obs)
     n_charuco = int((all_obs[:, 6] == 0).sum())
     n_aruco = int((all_obs[:, 6] == 1).sum())
     print(f"\nTotal observations: {len(all_obs)} (charuco: {n_charuco}, aruco: {n_aruco})")
 
-    huber_charuco = nn.HuberLoss(reduction="sum", delta=0.5)
-    huber_aruco = nn.HuberLoss(reduction="sum", delta=3.0)
+    huber_charuco = nn.HuberLoss(reduction="sum", delta=huber_charuco_delta)
+    huber_aruco = nn.HuberLoss(reduction="sum", delta=huber_aruco_delta)
 
     optimizer = torch.optim.Adam([
-        {"params": [cam.fx, cam.fy, cam.cx, cam.cy], "lr": 0.5},
-        {"params": [cam.dist_coeffs], "lr": 0.01},
-        {"params": board_poses.parameters(), "lr": 0.001},
+        {"params": [cam.fx, cam.fy, cam.cx, cam.cy], "lr": lr_cam},
+        {"params": [cam.dist_coeffs], "lr": lr_dist},
+        {"params": board_poses.parameters(), "lr": lr_poses},
     ])
-
-    batch_size = 100
     loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+    best_rmse = float("inf")
+    best_cam_state = None
+    best_poses_state = None
 
     print(f"Optimizing ({num_epochs} epochs, {len(loader)} batches/epoch, bs={batch_size})...")
     for epoch in range(num_epochs):
-        epoch_loss = 0.0
         epoch_sq_err = 0.0
         epoch_n = 0
         for (batch,) in loader:
@@ -458,14 +482,14 @@ def run_intrinsic_calibration(
             cam_pts = board_poses.transform(fi, pts_3d)
             proj = cam.project_camera_points(cam_pts)
 
-            # split loss by type
+            # split loss by type (aruco weighted down)
             charuco_mask = ptype == 0
             aruco_mask = ptype == 1
-            loss = torch.tensor(0.0, dtype=torch.float64)
+            loss = torch.tensor(0.0, dtype=torch.float64, device=dev)
             if charuco_mask.any():
                 loss = loss + huber_charuco(proj[charuco_mask], pts_2d[charuco_mask])
             if aruco_mask.any():
-                loss = loss + huber_aruco(proj[aruco_mask], pts_2d[aruco_mask])
+                loss = loss + aruco_weight * huber_aruco(proj[aruco_mask], pts_2d[aruco_mask])
 
             loss.backward()
             optimizer.step()
@@ -476,17 +500,36 @@ def run_intrinsic_calibration(
                 epoch_sq_err += sq_err
                 epoch_n += len(batch)
 
+        rmse = np.sqrt(epoch_sq_err / epoch_n)
+        if rmse < best_rmse:
+            best_rmse = rmse
+            best_cam_state = {k: v.clone() for k, v in cam.state_dict().items()}
+            best_poses_state = {k: v.clone() for k, v in board_poses.state_dict().items()}
+
         if epoch % 50 == 0 or epoch == num_epochs - 1:
-            rmse = np.sqrt(epoch_sq_err / epoch_n)
-            print(f"  epoch {epoch:>4d}  rmse={rmse:.4f} px  "
+            print(f"  epoch {epoch:>4d}  rmse={rmse:.4f} px  best={best_rmse:.4f} px  "
                   f"fx={cam.fx.item():.1f} fy={cam.fy.item():.1f} "
                   f"cx={cam.cx.item():.1f} cy={cam.cy.item():.1f}")
+
+    # restore best checkpoint
+    cam.load_state_dict(best_cam_state)
+    board_poses.load_state_dict(best_poses_state)
+    print(f"\nRestored best model (rmse={best_rmse:.4f} px)")
 
     # -- Step E: Metrics ----------------------------------------------------
     metrics = _compute_metrics(cam, board_poses, frame_data, fidx_to_int)
     _print_report(metrics)
 
-    return metrics
+    return {
+        "metrics": metrics,
+        "cam": cam,
+        "board_poses": board_poses,
+        "frame_data": frame_data,
+        "fidx_to_int": fidx_to_int,
+        "fidx_order": fidx_order,
+        "recording_dir": recording_dir,
+        "camera_serial": camera_serial,
+    }
 
 
 if __name__ == "__main__":

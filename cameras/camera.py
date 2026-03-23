@@ -38,7 +38,7 @@ class TorchCam(nn.Module):
 
     def project_world_points(self, pts: Union[torch.Tensor, np.ndarray]) -> torch.Tensor:
         """(N, 3) world points -> (N, 2) pixel coords.  NaN where no projection."""
-        pts = _to_f64(pts)
+        pts = _to_f64(pts, device=self.fx.device)
         # world -> camera: invert the cam-to-world pose
         T_world_to_cam = torch.inverse(self.pose)
         R = T_world_to_cam[:3, :3]
@@ -48,7 +48,7 @@ class TorchCam(nn.Module):
 
     def project_camera_points(self, pts: Union[torch.Tensor, np.ndarray]) -> torch.Tensor:
         """(N, 3) camera-frame points -> (N, 2) pixel coords.  NaN where z <= 0."""
-        pts = _to_f64(pts)
+        pts = _to_f64(pts, device=self.fx.device)
         z = pts[:, 2]
 
         valid = z > 0
@@ -69,7 +69,7 @@ class TorchCam(nn.Module):
 
         out = torch.stack([u, v], dim=1)  # (N, 2)
         nan_mask = ~valid.unsqueeze(1).expand_as(out)
-        out = torch.where(nan_mask, torch.tensor(float("nan"), dtype=out.dtype), out)
+        out = torch.where(nan_mask, torch.tensor(float("nan"), dtype=out.dtype, device=out.device), out)
         return out
 
     # ---- serialization ---------------------------------------------------
@@ -98,7 +98,8 @@ class TorchCam(nn.Module):
         )
 
 
-def _to_f64(pts: Union[torch.Tensor, np.ndarray]) -> torch.Tensor:
+def _to_f64(pts: Union[torch.Tensor, np.ndarray], device: torch.device = None) -> torch.Tensor:
     if isinstance(pts, np.ndarray):
-        return torch.from_numpy(pts).to(torch.float64)
+        t = torch.from_numpy(pts).to(torch.float64)
+        return t.to(device) if device is not None else t
     return pts.to(torch.float64)
