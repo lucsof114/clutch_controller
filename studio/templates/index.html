@@ -414,9 +414,9 @@ input[type=range]:disabled { opacity: 0.25; cursor: not-allowed; }
 
 <script>
 // ── State ─────────────────────────────────────────────────────────────────
-const cameras   = {};     // ip → status
-const paramState = {};    // ip → { exposure, gain, frameRate, dirty }
-const paused    = new Set(); // IPs with stream display paused
+const cameras   = {};     // serial → status
+const paramState = {};    // serial → { exposure, gain, frameRate, dirty }
+const paused    = new Set(); // serials with stream display paused
 let isRecording = false;
 let studioConnected = false;
 let currentTab  = 'cameras';
@@ -441,42 +441,42 @@ async function api(path, method = 'GET', body = null) {
 // ── Init ──────────────────────────────────────────────────────────────────
 async function init() {
   const list = await api('/api/cameras?discover=true');
-  list.forEach(c => { cameras[c.ip] = c; });
+  list.forEach(c => { cameras[c.serial] = c; });
   const n = list.length;
   document.getElementById('cam-count').textContent = n + ' camera' + (n !== 1 ? 's' : '');
   renderAll();
-  for (const cam of list) autoStart(cam.ip);
+  for (const cam of list) autoStart(cam.serial);
 }
 
-async function autoStart(ip) {
-  if (!cameras[ip].is_open) await api(`/api/cameras/${ip}/open`, 'POST', {});
+async function autoStart(cid) {
+  if (!cameras[cid].is_open) await api(`/api/cameras/${cid}/open`, 'POST', {});
 
   let updated = await api('/api/cameras');
-  updated.forEach(c => { cameras[c.ip] = c; });
+  updated.forEach(c => { cameras[c.serial] = c; });
 
-  if (!cameras[ip].is_grabbing) await api(`/api/cameras/${ip}/start`, 'POST');
+  if (!cameras[cid].is_grabbing) await api(`/api/cameras/${cid}/start`, 'POST');
 
   // Must refresh after start so renderCard sees is_grabbing=true and sets the stream src
   updated = await api('/api/cameras');
-  updated.forEach(c => { cameras[c.ip] = c; });
+  updated.forEach(c => { cameras[c.serial] = c; });
 
-  await refreshParams(ip);
-  renderCard(ip);
+  await refreshParams(cid);
+  renderCard(cid);
 }
 
 // ── Camera grid ────────────────────────────────────────────────────────────
 function renderAll() {
   const grid = document.getElementById('grid');
   grid.innerHTML = '';
-  const ips = Object.keys(cameras);
-  if (!ips.length) { grid.innerHTML = '<div class="empty">No cameras found.</div>'; return; }
-  ips.forEach(ip => renderCard(ip));
+  const ids = Object.keys(cameras);
+  if (!ids.length) { grid.innerHTML = '<div class="empty">No cameras found.</div>'; return; }
+  ids.forEach(cid => renderCard(cid));
 }
 
-function renderCard(ip) {
-  const cam = cameras[ip];
-  const id  = ip.replace(/\./g, '-');
-  const ps  = paramState[ip] || {};
+function renderCard(cid) {
+  const cam = cameras[cid];
+  const id  = cid;
+  const ps  = paramState[cid] || {};
   const exp = ps.exposure  ?? 5000;
   const gn  = ps.gain      ?? 0;
   const fr  = ps.frameRate ?? 24;
@@ -489,12 +489,12 @@ function renderCard(ip) {
 
   card.innerHTML = `
     <div class="stream-wrap">
-      <img id="img-${id}" ${cam.is_grabbing && !paused.has(ip) ? `src="/api/cameras/${ip}/stream"` : ''} alt="">
+      <img id="img-${id}" ${cam.is_grabbing && !paused.has(cid) ? `src="/api/cameras/${cid}/stream"` : ''} alt="">
       ${!cam.is_grabbing ? `
         <div class="stream-init" id="overlay-${id}">
           <div class="spinner"></div>
           <span>${cam.is_open ? 'Starting stream…' : 'Initialising…'}</span>
-        </div>` : paused.has(ip) ? `
+        </div>` : paused.has(cid) ? `
         <div class="stream-paused" id="overlay-${id}">
           <svg viewBox="0 0 24 24"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
           Paused
@@ -502,8 +502,8 @@ function renderCard(ip) {
       }
       <div class="stream-top">
         <div>
-          <div class="cam-id">${ip}</div>
-          <div class="cam-sub">${cam.model} &middot; ${cam.serial}</div>
+          <div class="cam-id">${cam.serial}</div>
+          <div class="cam-sub">${cam.model} &middot; ${cam.ip}</div>
         </div>
         <div class="status-dot ${dotCls}" id="dot-${id}"></div>
       </div>
@@ -513,8 +513,8 @@ function renderCard(ip) {
           <span>Frames&nbsp;<span class="v" id="fc-${id}">—</span></span>
           <span>Lost&nbsp;<span class="v" id="lp-${id}">—</span></span>
         </div>
-        <button class="play-btn" id="pb-${id}" onclick="togglePlay('${ip}')" title="Play/Pause">
-          ${playIcon(ip, cam)}
+        <button class="play-btn" id="pb-${id}" onclick="togglePlay('${cid}')" title="Play/Pause">
+          ${playIcon(cid, cam)}
         </button>
       </div>
     </div>
@@ -523,11 +523,11 @@ function renderCard(ip) {
         Parameters <span class="chev">&#9660;</span>
       </div>
       <div class="params-body" id="pbody-${id}">
-        ${pRow(ip, 'exposure',  'Exposure',   exp, 15, 100000, 'log', 'µs',  dis)}
-        ${pRow(ip, 'gain',      'Gain',        gn,  0,  23.98, 'lin', 'dB',  dis)}
-        ${pRow(ip, 'frameRate', 'Frame Rate',  fr,  1,  35,    'lin', 'fps', dis)}
+        ${pRow(cid, 'exposure',  'Exposure',   exp, 15, 100000, 'log', 'µs',  dis)}
+        ${pRow(cid, 'gain',      'Gain',        gn,  0,  23.98, 'lin', 'dB',  dis)}
+        ${pRow(cid, 'frameRate', 'Frame Rate',  fr,  1,  35,    'lin', 'fps', dis)}
         <div class="params-footer">
-          <button class="apply-btn" id="apply-${id}" onclick="submitParams('${ip}')" ${dis}>Apply</button>
+          <button class="apply-btn" id="apply-${id}" onclick="submitParams('${cid}')" ${dis}>Apply</button>
         </div>
       </div>
     </div>`;
@@ -537,16 +537,16 @@ function renderCard(ip) {
   else document.getElementById('grid').appendChild(card);
 }
 
-function playIcon(ip, cam) {
-  if (!cam.is_grabbing || paused.has(ip))
+function playIcon(cid, cam) {
+  if (!cam.is_grabbing || paused.has(cid))
     return `<svg viewBox="0 0 24 24"><polygon points="5,3 19,12 5,21"/></svg>`;
   return `<svg viewBox="0 0 24 24"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>`;
 }
 
 // ── Play / Pause (browser-side only, camera keeps grabbing) ───────────────
-function togglePlay(ip) {
-  const cam = cameras[ip];
-  const id  = ip.replace(/\./g, '-');
+function togglePlay(cid) {
+  const cam = cameras[cid];
+  const id  = cid;
 
   if (!cam.is_grabbing) return; // still initialising, do nothing
 
@@ -554,15 +554,15 @@ function togglePlay(ip) {
   const overlay = document.getElementById('overlay-' + id);
   const pb      = document.getElementById('pb-' + id);
 
-  if (paused.has(ip)) {
+  if (paused.has(cid)) {
     // Resume: reconnect stream
-    paused.delete(ip);
-    img.src = `/api/cameras/${ip}/stream`;
+    paused.delete(cid);
+    img.src = `/api/cameras/${cid}/stream`;
     overlay.style.display = 'none';
     pb.innerHTML = `<svg viewBox="0 0 24 24" style="width:11px;height:11px;fill:currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>`;
   } else {
     // Pause: drop browser connection, show static paused state
-    paused.add(ip);
+    paused.add(cid);
     img.src = '';
     overlay.innerHTML = `<svg viewBox="0 0 24 24" style="width:28px;height:28px;fill:#444;opacity:0.4"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg><span style="font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:#444">Paused</span>`;
     overlay.className = 'stream-paused';
@@ -572,8 +572,8 @@ function togglePlay(ip) {
 }
 
 // ── Param rows ────────────────────────────────────────────────────────────
-function pRow(ip, key, label, val, min, max, scale, unit, disabled) {
-  const id  = ip.replace(/\./g, '-');
+function pRow(cid, key, label, val, min, max, scale, unit, disabled) {
+  const id  = cid;
   const sMin = scale === 'log' ? Math.log10(Math.max(min, 1)) : min;
   const sMax = scale === 'log' ? Math.log10(max) : max;
   const sVal = scale === 'log' ? Math.log10(Math.max(val, 1)) : val;
@@ -583,10 +583,10 @@ function pRow(ip, key, label, val, min, max, scale, unit, disabled) {
     <div class="param-row">
       <span class="p-label">${label}</span>
       <input type="range" id="sl-${id}-${key}" min="${sMin}" max="${sMax}" step="${step}" value="${sVal}" ${disabled}
-        oninput="onSlider('${ip}','${key}','${scale}','${unit}',this.value)">
+        oninput="onSlider('${cid}','${key}','${scale}','${unit}',this.value)">
       <input type="text" class="p-input" id="in-${id}-${key}" value="${disp}" ${disabled}
-        onchange="onInput('${ip}','${key}','${scale}','${unit}',this.value)"
-        onkeydown="if(event.key==='Enter')onInput('${ip}','${key}','${scale}','${unit}',this.value)">
+        onchange="onInput('${cid}','${key}','${scale}','${unit}',this.value)"
+        onkeydown="if(event.key==='Enter')onInput('${cid}','${key}','${scale}','${unit}',this.value)">
       <span class="p-unit">${unit}</span>
     </div>`;
 }
@@ -597,46 +597,42 @@ function fmt(val, unit) {
   return Math.round(val);
 }
 
-function onSlider(ip, key, scale, unit, raw) {
+function onSlider(cid, key, scale, unit, raw) {
   const val = scale === 'log' ? Math.pow(10, parseFloat(raw)) : parseFloat(raw);
-  const id  = ip.replace(/\./g, '-');
-  const el  = document.getElementById(`in-${id}-${key}`);
+  const el  = document.getElementById(`in-${cid}-${key}`);
   if (el) { el.value = fmt(val, unit); el.classList.add('dirty'); }
-  markDirty(ip, key, val);
+  markDirty(cid, key, val);
 }
 
-function onInput(ip, key, scale, unit, raw) {
+function onInput(cid, key, scale, unit, raw) {
   const val = parseFloat(raw);
   if (isNaN(val)) return;
-  const id  = ip.replace(/\./g, '-');
-  const sl  = document.getElementById(`sl-${id}-${key}`);
+  const sl  = document.getElementById(`sl-${cid}-${key}`);
   if (sl) sl.value = scale === 'log' ? Math.log10(Math.max(val, 1)) : val;
-  document.getElementById(`in-${id}-${key}`)?.classList.add('dirty');
-  markDirty(ip, key, val);
+  document.getElementById(`in-${cid}-${key}`)?.classList.add('dirty');
+  markDirty(cid, key, val);
 }
 
-function markDirty(ip, key, val) {
-  if (!paramState[ip]) paramState[ip] = {};
-  paramState[ip][key] = val;
-  paramState[ip].dirty = true;
-  const id = ip.replace(/\./g, '-');
-  document.getElementById(`apply-${id}`)?.classList.add('dirty');
+function markDirty(cid, key, val) {
+  if (!paramState[cid]) paramState[cid] = {};
+  paramState[cid][key] = val;
+  paramState[cid].dirty = true;
+  document.getElementById(`apply-${cid}`)?.classList.add('dirty');
 }
 
-async function submitParams(ip) {
-  const ps = paramState[ip];
+async function submitParams(cid) {
+  const ps = paramState[cid];
   if (!ps?.dirty) return;
-  const id = ip.replace(/\./g, '-');
-  const btn = document.getElementById(`apply-${id}`);
+  const btn = document.getElementById(`apply-${cid}`);
   if (btn) { btn.disabled = true; btn.textContent = 'Applying…'; }
   const body = {};
   if (ps.exposure  != null) body.exposure_us = ps.exposure;
   if (ps.gain      != null) body.gain        = ps.gain;
   if (ps.frameRate != null) body.frame_rate  = ps.frameRate;
-  await api(`/api/cameras/${ip}/parameters`, 'POST', body);
+  await api(`/api/cameras/${cid}/parameters`, 'POST', body);
   ps.dirty = false;
   ['exposure','gain','frameRate'].forEach(k =>
-    document.getElementById(`in-${id}-${k}`)?.classList.remove('dirty'));
+    document.getElementById(`in-${cid}-${k}`)?.classList.remove('dirty'));
   if (btn) { btn.disabled = false; btn.textContent = 'Apply'; btn.classList.remove('dirty'); }
 }
 
@@ -646,37 +642,36 @@ function toggleParams(id) {
 }
 
 // ── Stats polling ─────────────────────────────────────────────────────────
-async function refreshParams(ip) {
+async function refreshParams(cid) {
   try {
-    const p = await api(`/api/cameras/${ip}/parameters`);
-    if (!paramState[ip]) paramState[ip] = {};
-    const ps = paramState[ip];
+    const p = await api(`/api/cameras/${cid}/parameters`);
+    if (!paramState[cid]) paramState[cid] = {};
+    const ps = paramState[cid];
     if (!ps.dirty) {
       if (p.ExposureTime)          ps.exposure  = p.ExposureTime.current;
       if (p.Gain)                  ps.gain      = p.Gain.current;
       if (p.AcquisitionFrameRate)  ps.frameRate = p.AcquisitionFrameRate.current;
     }
-    if (p._stats) updateStats(ip, p._stats);
+    if (p._stats) updateStats(cid, p._stats);
   } catch(e) {}
 }
 
-function updateStats(ip, s) {
-  const id = ip.replace(/\./g, '-');
-  const fps = document.getElementById('fps-' + id);
-  const fc  = document.getElementById('fc-'  + id);
-  const lp  = document.getElementById('lp-'  + id);
+function updateStats(cid, s) {
+  const fps = document.getElementById('fps-' + cid);
+  const fc  = document.getElementById('fc-'  + cid);
+  const lp  = document.getElementById('lp-'  + cid);
   if (fps) fps.textContent = s.acq_fps ?? '—';
   if (fc)  fc.textContent  = s.frame_count ?? '—';
   if (lp)  lp.textContent  = s.lost_packets ?? '—';
 }
 
 async function pollStats() {
-  for (const ip of Object.keys(cameras)) {
-    if (!cameras[ip].is_open) continue;
+  for (const cid of Object.keys(cameras)) {
+    if (!cameras[cid].is_open) continue;
     try {
-      const p = await api(`/api/cameras/${ip}/parameters`);
-      if (p._stats) updateStats(ip, p._stats);
-      const ps = paramState[ip];
+      const p = await api(`/api/cameras/${cid}/parameters`);
+      if (p._stats) updateStats(cid, p._stats);
+      const ps = paramState[cid];
       if (ps && !ps.dirty) {
         if (p.ExposureTime)          ps.exposure  = p.ExposureTime.current;
         if (p.Gain)                  ps.gain      = p.Gain.current;
@@ -724,8 +719,8 @@ async function toggleRecording() {
       document.getElementById('rec-dot').classList.remove('active');
       const total = Object.values(res.frame_counts || {}).reduce((a,b)=>a+b,0);
       let label = `saved · ${total} frames`;
-      if (res.sync && res.sync.timing_ok != null) {
-        label += res.sync.timing_ok ? ' · sync OK' : ' · sync FAULT';
+      if (res.sync) {
+        label += ` · ${res.sync.sync_count} syncs · ${res.sync.recording_frequency.toFixed(1)} Hz`;
       }
       if (res.warnings && res.warnings.length) {
         label += ` · ${res.warnings.length} warning${res.warnings.length > 1 ? 's' : ''}`;
@@ -819,10 +814,9 @@ function buildRecDetail(r) {
 function buildCamCard(c) {
   const params = c.parameters || {};
   const paramRows = [
-    ['Exposure',   params.ExposureTime  != null ? Math.round(params.ExposureTime)  + ' µs' : '—'],
-    ['Gain',       params.Gain          != null ? parseFloat(params.Gain).toFixed(1) + ' dB' : '—'],
-    ['Frame Rate', params.AcquisitionFrameRate != null ? parseFloat(params.AcquisitionFrameRate).toFixed(1) + ' fps' : '—'],
-    ['Pixel Fmt',  params.PixelFormat   != null ? '0x' + params.PixelFormat.toString(16).toUpperCase() : '—'],
+    ['Exposure',   params.exposure_us  != null ? Math.round(params.exposure_us)  + ' µs' : '—'],
+    ['Gain',       params.gain_db      != null ? parseFloat(params.gain_db).toFixed(1) + ' dB' : '—'],
+    ['Frame Rate', params.frame_rate   != null ? parseFloat(params.frame_rate).toFixed(1) + ' fps' : '—'],
   ].map(([k,v]) =>
     `<div class="cam-param-row"><span class="pk">${k}</span><span class="pv">${v}</span></div>`
   ).join('');
@@ -831,8 +825,8 @@ function buildCamCard(c) {
     <div class="cam-card">
       <div class="cam-card-hdr">
         <div>
-          <div class="cam-card-id">${c.serial || c.camera_id}</div>
-          <div class="cam-card-model">${c.model || '—'} &middot; ${c.camera_id}</div>
+          <div class="cam-card-id">${c.serial}</div>
+          <div class="cam-card-model">${c.model || '—'} &middot; ${c.ip}</div>
         </div>
         <div class="cam-stat">
           <div class="sv">${(c.frame_count||0).toLocaleString()}</div>

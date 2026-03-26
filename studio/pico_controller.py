@@ -29,7 +29,6 @@ SAMPLE_INTERVAL_US = 10
 OVERVIEW_SIZE = 15000
 SAMPLES_PER_SEC = 1_000_000 / SAMPLE_INTERVAL_US
 THRESHOLD_ADC = int(3.0 * 32767.0 / 10.0)  # 3V threshold in ±10V range
-FRAME_TOLERANCE_US = 15.0
 
 CALLBACK_TYPE = CFUNCTYPE(
     None, POINTER(POINTER(c_int16)), c_int16, c_uint32, c_int16, c_int16, c_uint32
@@ -39,15 +38,10 @@ _SHUTDOWN = None
 _active_callback = None
 
 
-# ── Result dataclass ─────────────────────────────────────────────────────────
 @dataclass
-class SyncResult:
-    edge_count: int
+class PicoResult:
+    """Raw output from PicoScope edge detection — just timestamps, no analysis."""
     timestamps_us: list[float]
-    timing_ok: bool
-    worst_error_us: float
-    fault_intervals: list[dict]
-    interval_stats: dict | None = None
     total_samples: int = 0
 
 
@@ -247,8 +241,8 @@ class PicoController:
         self._is_tracking = True
         log.info("PicoScope tracking started at %.1f Hz", freq_hz)
 
-    def stop_tracking(self) -> SyncResult:
-        """Stop worker, compute timing from collected edge timestamps."""
+    def stop_tracking(self) -> PicoResult:
+        """Stop worker, return raw edge timestamps."""
         if not self._is_tracking:
             raise RuntimeError("Not tracking")
 
@@ -263,50 +257,13 @@ class PicoController:
         state = self._state
         timestamps_us = [t * SAMPLE_INTERVAL_US for t in state.edge_timestamps]
 
-        # Compute time deltas and validate
-        timing_ok = True
-        worst_error_us = 0.0
-        fault_intervals = []
-        interval_stats = None
-
-        if len(state.edge_timestamps) > 1:
-            intervals = np.diff(np.array(state.edge_timestamps, dtype=float)) * SAMPLE_INTERVAL_US
-            expected_us = 1_000_000.0 / self._freq_hz
-            errors = np.abs(intervals - expected_us)
-            worst_error_us = float(errors.max())
-
-            if worst_error_us > FRAME_TOLERANCE_US:
-                timing_ok = False
-                for i in np.nonzero(errors > FRAME_TOLERANCE_US)[0]:
-                    if len(fault_intervals) >= 10:
-                        break
-                    fault_intervals.append({
-                        'edge_num': int(i + 1),
-                        'measured_us': float(intervals[i]),
-                        'expected_us': expected_us,
-                        'error_us': float(errors[i]),
-                    })
-
-            interval_stats = {
-                'mean': float(intervals.mean()),
-                'std': float(intervals.std()),
-                'min': float(intervals.min()),
-                'max': float(intervals.max()),
-                'expected': expected_us,
-            }
-
-        result = SyncResult(
-            edge_count=len(state.edge_timestamps),
+        result = PicoResult(
             timestamps_us=timestamps_us,
-            timing_ok=timing_ok,
-            worst_error_us=worst_error_us,
-            fault_intervals=fault_intervals,
-            interval_stats=interval_stats,
             total_samples=state.total_samples,
         )
 
-        log.info("PicoScope tracking stopped: %d edges, timing_ok=%s, worst_error=%.1f us",
-                 result.edge_count, result.timing_ok, result.worst_error_us)
+        log.info("PicoScope tracking stopped: %d edges, %d total samples",
+                 len(timestamps_us), state.total_samples)
         self._state = None
         return result
 

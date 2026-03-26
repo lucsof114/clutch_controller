@@ -11,7 +11,8 @@ Multi-camera control system for Hikrobot MV-CS050-10GM-PRO GigE cameras.
 ```bash
 export MVCAM_COMMON_RUNENV=/opt/MVS/lib  # already in ~/.zshrc
 source venv/bin/activate
-python server.py
+pip install -e .
+python -m studio.server
 ```
 
 If port 5000 is in use: `fuser -k 5000/tcp`
@@ -19,11 +20,15 @@ If port 5000 is in use: `fuser -k 5000/tcp`
 ## Architecture
 
 ```
-camera_manager.py     — CameraInstance + CameraManager (SDK layer, acquisition threads)
-recording_manager.py  — RecordingManager (queue-based disk writer, per-camera saver threads)
-recording_metadata.py — RecordingMetadata dataclass (standardised JSON metadata)
-server.py             — Flask API (thin wrapper, all logic in the classes above)
-templates/index.html  — Web UI (cameras tab + recordings tab, self-contained)
+studio/                          — installable Python package (pip install -e .)
+  server.py                      — Flask API (thin wrapper, all logic in the classes below)
+  camera_manager.py              — CameraInstance + CameraManager (SDK layer, acquisition threads)
+  recording_manager.py           — RecordingManager (queue-based disk writer, per-camera saver threads)
+  recording_metadata.py          — RecordingMetadata dataclass (standardised JSON metadata)
+  studio_controller.py           — orchestrator: Arduino + PicoScope + cameras
+  pico_controller.py             — PicoScope sync signal validation
+  arduino_controller/            — Arduino PWM trigger (firmware + serial client)
+  templates/index.html           — Web UI (cameras tab + recordings tab, self-contained)
 ```
 
 ## SDK notes
@@ -43,7 +48,7 @@ templates/index.html  — Web UI (cameras tab + recordings tab, self-contained)
 - Acquisition thread: `put_nowait` → drop on full (never blocks)
 - Saver thread: drains queue → `cv2.imwrite` PNG
 - `Queue(maxsize=120)` per camera
-- `_make_frame_id(n)` in `recording_manager.py` is intentionally isolated — swap for timestamp-based logic when ready
+- `_make_frame_id(n)` in `studio/recording_manager.py` is intentionally isolated — swap for timestamp-based logic when ready
 - Directory naming uses camera serial number (not IP)
 
 ## Storage layout

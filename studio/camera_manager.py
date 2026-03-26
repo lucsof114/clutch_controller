@@ -19,9 +19,6 @@ sys.path.insert(0, MVS_SDK_PATH)
 
 from MvCameraControl_class import *
 
-from recording_manager import RecordingManager
-from recording_metadata import CameraRecordingInfo, SyncMetadata
-
 log = logging.getLogger("camera_manager")
 
 MONO8 = 0x01080001
@@ -380,8 +377,7 @@ class CameraManager:
 
     def __init__(self):
         MvCamera.MV_CC_Initialize()
-        self._cameras = {}  # ip_str -> CameraInstance
-        self._recording_manager = RecordingManager()
+        self._cameras = {}  # serial -> CameraInstance
         log.info("CameraManager initialized (SDK ready)")
 
     def discover(self):
@@ -401,15 +397,15 @@ class CameraManager:
             model = _decode_char(gige.chModelName)
             serial = _decode_char(gige.chSerialNumber)
 
-            if ip not in self._cameras:
-                self._cameras[ip] = CameraInstance(dev_info, ip, model, serial)
+            if serial not in self._cameras:
+                self._cameras[serial] = CameraInstance(dev_info, ip, model, serial)
             else:
                 # Update dev_info in case it changed
-                self._cameras[ip]._dev_info = dev_info
-                self._cameras[ip].model = model
-                self._cameras[ip].serial = serial
+                self._cameras[serial]._dev_info = dev_info
+                self._cameras[serial].ip = ip
+                self._cameras[serial].model = model
 
-            found.append(ip)
+            found.append(serial)
 
         log.info("Discovered %d camera(s): %s", len(found), found)
         return found
@@ -434,53 +430,7 @@ class CameraManager:
     def list_cameras(self):
         return [cam.status() for cam in self._cameras.values()]
 
-    def start_recording(self, camera_ids=None) -> str:
-        grabbing = [ip for ip, cam in self._cameras.items() if cam.is_grabbing]
-        if not grabbing:
-            raise RuntimeError("No cameras are currently grabbing")
-        if camera_ids is None:
-            camera_ids = grabbing
-        else:
-            for cid in camera_ids:
-                if cid not in self._cameras:
-                    raise KeyError(f"Camera {cid} not found")
-                if not self._cameras[cid].is_grabbing:
-                    raise RuntimeError(f"Camera {cid} is not grabbing")
-
-        # Capture current camera params for metadata
-        camera_infos = []
-        for cid in camera_ids:
-            cam = self._cameras[cid]
-            params = cam.get_parameters()
-            info = CameraRecordingInfo(
-                camera_id=cid,
-                model=cam.model,
-                serial=cam.serial,
-                parameters={
-                    k: v["current"] if isinstance(v, dict) else v
-                    for k, v in params.items()
-                    if not k.startswith("_")
-                },
-            )
-            camera_infos.append(info)
-
-        recording_id, queues = self._recording_manager.start(camera_ids, camera_infos)
-        for cid, q in queues.items():
-            self._cameras[cid]._record_queue = q
-        return recording_id
-
-    def stop_recording(self, sync: SyncMetadata | None = None,
-                        warnings: list[str] | None = None) -> dict:
-        for cam in self._cameras.values():
-            cam._record_queue = None
-        return self._recording_manager.stop(sync=sync, warnings=warnings)
-
     def shutdown(self):
-        if self._recording_manager.is_recording:
-            try:
-                self.stop_recording()
-            except Exception as e:
-                log.warning("Error stopping recording on shutdown: %s", e)
         for cam in self._cameras.values():
             try:
                 cam.close()

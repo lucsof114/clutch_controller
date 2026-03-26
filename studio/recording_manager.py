@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
+import json
 import queue
 import threading
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 import cv2
 
-from recording_metadata import CameraRecordingInfo, RecordingMetadata, SyncMetadata
+from studio.recording_metadata import CameraRecordingInfo, RecordingMetadata, SyncMetadata
 
 RECORDING_BASE = Path.home() / "Documents" / "clutch" / "clutch_db"
 CATALOG_DIR    = RECORDING_BASE / "catalog"
@@ -31,7 +31,7 @@ def _make_frame_id(n: int) -> str:
 class RecordingManager:
     def __init__(self):
         self._recording_id: str | None = None
-        self._metadata: Optional[RecordingMetadata] = None
+        self._metadata: RecordingMetadata | None = None
         self._queues: dict[str, queue.Queue] = {}
         self._saver_threads: dict[str, threading.Thread] = {}
         self._frame_counts: dict[str, int] = {}
@@ -41,10 +41,18 @@ class RecordingManager:
     def is_recording(self) -> bool:
         return self._recording_id is not None
 
+    @property
+    def recording_base(self) -> Path:
+        return RECORDING_BASE
+
+    @property
+    def catalog_dir(self) -> Path:
+        return CATALOG_DIR
+
     def start(
         self,
         camera_ids: list[str],
-        camera_infos: Optional[list[CameraRecordingInfo]] = None,
+        camera_infos: list[CameraRecordingInfo] | None = None,
     ) -> tuple[str, dict[str, queue.Queue]]:
         if self.is_recording:
             raise RuntimeError("Already recording")
@@ -53,7 +61,7 @@ class RecordingManager:
         RECORDING_BASE.mkdir(parents=True, exist_ok=True)
 
         if camera_infos is None:
-            camera_infos = [CameraRecordingInfo(camera_id=cid, model="", serial="")
+            camera_infos = [CameraRecordingInfo(ip=cid, model="", serial="")
                             for cid in camera_ids]
 
         self._metadata = RecordingMetadata.start(recording_id, camera_infos)
@@ -62,8 +70,8 @@ class RecordingManager:
         self._frame_counts = {}
         self._size_bytes = {}
 
-        # Build camera_id → serial lookup for directory naming
-        self._serial_map = {info.camera_id: info.serial or info.camera_id
+        # Build serial → dir_name lookup for directory naming
+        self._serial_map = {info.serial: info.serial
                             for info in camera_infos}
         serial_map = self._serial_map
 
@@ -102,22 +110,6 @@ class RecordingManager:
             t.join()
             log.info("Saver thread joined for %s", cid)
 
-        # Discard first frame from each camera (garbage from trigger arming)
-        rec_dir = RECORDING_BASE / recording_id
-        for cid in self._saver_threads:
-            dir_name = self._serial_map.get(cid, cid)
-            first_frame_dir = rec_dir / dir_name / _make_frame_id(0)
-            if first_frame_dir.exists():
-                import shutil
-                try:
-                    sz = sum(f.stat().st_size for f in first_frame_dir.iterdir())
-                    shutil.rmtree(first_frame_dir)
-                    self._frame_counts[cid] = max(self._frame_counts.get(cid, 0) - 1, 0)
-                    self._size_bytes[cid] = max(self._size_bytes.get(cid, 0) - sz, 0)
-                    log.info("Discarded first frame for %s", cid)
-                except Exception as e:
-                    log.warning("Failed to discard first frame for %s: %s", cid, e)
-
         # Finalise and persist metadata
         if self._metadata is not None:
             self._metadata.finalise(self._frame_counts, self._size_bytes)
@@ -129,9 +121,8 @@ class RecordingManager:
             self._metadata.save(rec_dir)
             # Mirror to catalog as a flat <recording_id>.json
             CATALOG_DIR.mkdir(parents=True, exist_ok=True)
-            import json as _json
             (CATALOG_DIR / f"{recording_id}.json").write_text(
-                _json.dumps(self._metadata.to_dict(), indent=2)
+                json.dumps(self._metadata.to_dict(), indent=2)
             )
             log.info("Metadata written: %s/metadata.json + catalog", recording_id)
 
@@ -155,6 +146,7 @@ class RecordingManager:
     def _saver_loop(self, camera_id: str, q: queue.Queue, base_dir: Path):
         n = 0
         total_bytes = 0
+        first = True  # skip first frame (garbage from trigger arming)
 
         while True:
             try:
@@ -168,6 +160,12 @@ class RecordingManager:
                 log.info("Saver done %s: %d frames, %.1f MB",
                          camera_id, n, total_bytes / 1_048_576)
                 return
+
+            if first:
+                first = False
+                q.task_done()
+                log.info("Skipped first frame for %s (trigger arming garbage)", camera_id)
+                continue
 
             frame_id = _make_frame_id(n)
             frame_dir = base_dir / frame_id
