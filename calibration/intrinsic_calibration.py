@@ -328,6 +328,8 @@ def _print_report(metrics: dict):
     print(f"    k2:                 {dc[1]:.6f}")
     print(f"    t1:                 {dc[2]:.6f}")
     print(f"    t2:                 {dc[3]:.6f}")
+    if len(dc) > 4:
+        print(f"    k3:                 {dc[4]:.6f}")
     print("=" * 60)
 
 
@@ -350,6 +352,7 @@ def run_intrinsic_calibration(
     batch_size: int = 100000,
     aruco_weight: float = 1.0,
     detections_df: Optional[pd.DataFrame] = None,
+    pnp_reproj_threshold: float = 3.0,
 ) -> dict:
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -382,7 +385,7 @@ def run_intrinsic_calibration(
         "fx": focal, "fy": focal,
         "cx": w / 2.0, "cy": h / 2.0,
         "width": w, "height": h,
-        "dist_coeffs": [0.0, 0.0, 0.0, 0.0],
+        "dist_coeffs": [0.0, 0.0, 0.0, 0.0, 0.0],
     }
     cam = TorchCam(camera_serial, intrinsics, torch.eye(4, dtype=torch.float64))
     cam.to(dev)
@@ -403,13 +406,17 @@ def run_intrinsic_calibration(
     fidx_order = []
     pnp_errors = []
 
-    print(f"\nRunning PnP on {len(frame_groups)} frames...")
+    print(f"\nRunning PnP on {len(frame_groups)} frames (reproj threshold={pnp_reproj_threshold:.1f} px)...")
+    rejected_pnp = 0
     for fidx, grp in frame_groups.items():
         obs = _extract_frame_observations(grp)
         result = _init_pnp(obs, camera_matrix, dist_np)
         if result is None:
             continue
         rvec, tvec, err = result
+        if err > pnp_reproj_threshold:
+            rejected_pnp += 1
+            continue
         pnp_errors.append(err)
         frame_data[fidx] = obs
         rvec_list.append(rvec.flatten())
@@ -419,7 +426,8 @@ def run_intrinsic_calibration(
     if not frame_data:
         raise RuntimeError("All frames rejected by PnP (error > 50px)")
 
-    print(f"PnP: {len(frame_data)}/{len(frame_groups)} frames accepted "
+    print(f"PnP: {len(frame_data)}/{len(frame_groups)} frames accepted, "
+          f"{rejected_pnp} rejected by reproj threshold "
           f"(mean error {np.mean(pnp_errors):.2f} px)")
 
     # -- Step D: Build dataset and dataloader --------------------------------

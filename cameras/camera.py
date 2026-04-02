@@ -22,7 +22,10 @@ class TorchCam(nn.Module):
         self.cy = nn.Parameter(torch.tensor(float(intrinsics["cy"]), dtype=torch.float64))
 
         dc = intrinsics.get("dist_coeffs", [0.0, 0.0, 0.0, 0.0])
-        self.dist_coeffs = nn.Parameter(torch.tensor(dc, dtype=torch.float64))  # [k1, k2, t1, t2]
+        # Support 4 or 5 coefficients: [k1, k2, t1, t2] or [k1, k2, t1, t2, k3]
+        if len(dc) < 5:
+            dc = list(dc) + [0.0] * (5 - len(dc))
+        self.dist_coeffs = nn.Parameter(torch.tensor(dc[:5], dtype=torch.float64))  # [k1, k2, t1, t2, k3]
 
         self.pose = nn.Parameter(extrinsics.to(torch.float64).clone())  # cam-to-world (4x4)
 
@@ -57,10 +60,12 @@ class TorchCam(nn.Module):
         x = pts[:, 0] / safe_z
         y = pts[:, 1] / safe_z
 
-        # radial + tangential distortion (OpenCV model, 4 coeffs)
-        k1, k2, t1, t2 = self.dist_coeffs[0], self.dist_coeffs[1], self.dist_coeffs[2], self.dist_coeffs[3]
+        # radial + tangential distortion (OpenCV model, 5 coeffs)
+        k1, k2, t1, t2, k3 = (self.dist_coeffs[i] for i in range(5))
         r2 = x * x + y * y
-        radial = 1.0 + k1 * r2 + k2 * r2 * r2
+        r4 = r2 * r2
+        r6 = r4 * r2
+        radial = 1.0 + k1 * r2 + k2 * r4 + k3 * r6
         xd = x * radial + 2.0 * t1 * x * y + t2 * (r2 + 2.0 * x * x)
         yd = y * radial + t1 * (r2 + 2.0 * y * y) + 2.0 * t2 * x * y
 

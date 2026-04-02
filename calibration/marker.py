@@ -65,7 +65,19 @@ class MarkerDetector:
             aruco_dict,
             np.array(self.marker_ids, dtype=np.int32),
         )
-        self.detector = cv2.aruco.CharucoDetector(self.board)
+        # Enable subpixel corner refinement on ArUco markers
+        detector_params = cv2.aruco.DetectorParameters()
+        detector_params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
+        detector_params.cornerRefinementWinSize = 5
+        detector_params.cornerRefinementMaxIterations = 30
+        detector_params.cornerRefinementMinAccuracy = 0.01
+
+        charuco_params = cv2.aruco.CharucoParameters()
+        charuco_params.tryRefineMarkers = True
+
+        self.detector = cv2.aruco.CharucoDetector(
+            self.board, charuco_params, detector_params,
+        )
 
         # derive corner-to-marker-pair map and 3D positions
         # inner corners: (rows-1) x (cols-1) grid
