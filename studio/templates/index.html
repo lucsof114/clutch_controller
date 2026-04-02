@@ -89,6 +89,20 @@ header {
 .studio-dot.connected { background: var(--green); box-shadow: 0 0 5px var(--green); }
 .studio-label { font-family: var(--font-mono); font-size: 10px; color: var(--text3); white-space: nowrap; }
 .studio-label.connected { color: var(--text2); }
+/* Tag control */
+.tag-area { display: flex; align-items: center; gap: 8px; margin-right: 14px; padding-right: 14px; border-right: 1px solid var(--border); }
+.tag-label { font-family: var(--font-mono); font-size: 10px; color: var(--text3); }
+.seg { display: flex; border: 1px solid var(--border2); border-radius: 5px; overflow: hidden; }
+.seg-btn { padding: 4px 10px; font-size: 11px; font-weight: 500; color: var(--text2); background: var(--surface2); border: none; cursor: pointer; transition: background 0.12s, color 0.12s; white-space: nowrap; }
+.seg-btn + .seg-btn { border-left: 1px solid var(--border2); }
+.seg-btn:hover:not(.active) { background: #222; color: var(--text); }
+.seg-btn.active { background: #1e3a5f; color: var(--accent); }
+/* FPS control */
+.fps-area { display: flex; align-items: center; gap: 6px; margin-right: 14px; padding-right: 14px; border-right: 1px solid var(--border); }
+.fps-label { font-family: var(--font-mono); font-size: 10px; color: var(--text3); }
+.fps-input { width: 42px; background: var(--surface2); border: 1px solid var(--border2); border-radius: 4px; color: var(--text); font-family: var(--font-mono); font-size: 11px; padding: 3px 6px; text-align: center; outline: none; -moz-appearance: textfield; }
+.fps-input::-webkit-inner-spin-button, .fps-input::-webkit-outer-spin-button { -webkit-appearance: none; }
+.fps-input:focus { border-color: var(--accent); }
 /* Recording controls */
 .rec-area { display: flex; align-items: center; gap: 10px; }
 #rec-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text3); transition: background 0.2s; }
@@ -259,6 +273,14 @@ input[type=range]:disabled { opacity: 0.25; cursor: not-allowed; }
 .apply-btn:disabled { opacity: 0.25; cursor: not-allowed; }
 
 /* ── Recordings tab ──────────────────────────────────────── */
+.rec-toolbar {
+  display: none; align-items: center; gap: 10px;
+  max-width: 960px; margin-bottom: 10px;
+  padding: 8px 14px; border-radius: 6px;
+  background: var(--surface2); border: 1px solid var(--border2);
+}
+.rec-toolbar.visible { display: flex; }
+.rec-sel-count { font-size: 12px; color: var(--text2); flex: 1; font-family: var(--font-mono); }
 .rec-list { display: flex; flex-direction: column; gap: 8px; max-width: 960px; }
 
 .rec-item {
@@ -268,6 +290,7 @@ input[type=range]:disabled { opacity: 0.25; cursor: not-allowed; }
   overflow: hidden;
 }
 
+.rec-item.selected { border-color: #1e3a5f; background: #0a1520; }
 .rec-item-hdr {
   display: flex; align-items: center; gap: 14px;
   padding: 13px 18px;
@@ -276,6 +299,10 @@ input[type=range]:disabled { opacity: 0.25; cursor: not-allowed; }
   transition: background 0.12s;
 }
 .rec-item-hdr:hover { background: var(--surface2); }
+.rec-check {
+  width: 15px; height: 15px; flex-shrink: 0;
+  accent-color: var(--accent); cursor: pointer;
+}
 
 .rec-id {
   font-family: var(--font-mono); font-size: 13px; font-weight: 600;
@@ -391,6 +418,19 @@ input[type=range]:disabled { opacity: 0.25; cursor: not-allowed; }
     <div class="studio-dot" id="studio-dot"></div>
     <span class="studio-label" id="studio-label">studio</span>
   </div>
+  <div class="tag-area">
+    <span class="tag-label">TAG</span>
+    <div class="seg" id="tag-seg">
+      <button class="seg-btn" data-tag="intrinsic" onclick="toggleTag('intrinsic')">intrinsic</button>
+      <button class="seg-btn" data-tag="extrinsic" onclick="toggleTag('extrinsic')">extrinsic</button>
+      <button class="seg-btn" data-tag="data"      onclick="toggleTag('data')">data</button>
+    </div>
+  </div>
+  <div class="fps-area">
+    <span class="fps-label">FPS</span>
+    <input type="number" id="fps-input" class="fps-input" min="1" max="35" step="1" value="30"
+      onchange="onGlobalFps(this.value)" onblur="onGlobalFps(this.value)">
+  </div>
   <div class="rec-area">
     <div id="rec-dot"></div>
     <span id="rec-label">idle</span>
@@ -407,6 +447,11 @@ input[type=range]:disabled { opacity: 0.25; cursor: not-allowed; }
 
 <!-- Recordings page -->
 <div class="page" id="page-recordings">
+  <div class="rec-toolbar" id="rec-toolbar">
+    <span class="rec-sel-count" id="rec-sel-count"></span>
+    <button class="btn danger" onclick="deleteSelected()">Delete selected</button>
+    <button class="btn" onclick="clearSelection()">Clear</button>
+  </div>
   <div class="rec-list" id="rec-list">
     <div class="empty"><div class="spinner"></div>Loading recordings…</div>
   </div>
@@ -418,6 +463,9 @@ const cameras   = {};     // serial → status
 const paramState = {};    // serial → { exposure, gain, frameRate, dirty }
 const paused    = new Set(); // serials with stream display paused
 let isRecording = false;
+let globalFps = 30;
+const selectedTags = new Set();
+const selectedRecs = new Set();
 let studioConnected = false;
 let currentTab  = 'cameras';
 
@@ -449,7 +497,7 @@ async function init() {
 }
 
 async function autoStart(cid) {
-  if (!cameras[cid].is_open) await api(`/api/cameras/${cid}/open`, 'POST', {});
+  if (!cameras[cid].is_open) await api(`/api/cameras/${cid}/open`, 'POST', { frame_rate: globalFps });
 
   let updated = await api('/api/cameras');
   updated.forEach(c => { cameras[c.serial] = c; });
@@ -479,7 +527,6 @@ function renderCard(cid) {
   const ps  = paramState[cid] || {};
   const exp = ps.exposure  ?? 5000;
   const gn  = ps.gain      ?? 0;
-  const fr  = ps.frameRate ?? 24;
   const dis = !cam.is_open ? 'disabled' : '';
   const dotCls = cam.is_grabbing ? 'grabbing' : cam.is_open ? 'open' : '';
 
@@ -516,6 +563,9 @@ function renderCard(cid) {
         <button class="play-btn" id="pb-${id}" onclick="togglePlay('${cid}')" title="Play/Pause">
           ${playIcon(cid, cam)}
         </button>
+        <button class="play-btn" id="rb-${id}" onclick="rebootCamera('${cid}')" title="Reboot camera" style="margin-left:6px">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+        </button>
       </div>
     </div>
     <div class="params-panel">
@@ -525,7 +575,6 @@ function renderCard(cid) {
       <div class="params-body" id="pbody-${id}">
         ${pRow(cid, 'exposure',  'Exposure',   exp, 15, 100000, 'log', 'µs',  dis)}
         ${pRow(cid, 'gain',      'Gain',        gn,  0,  23.98, 'lin', 'dB',  dis)}
-        ${pRow(cid, 'frameRate', 'Frame Rate',  fr,  1,  35,    'lin', 'fps', dis)}
         <div class="params-footer">
           <button class="apply-btn" id="apply-${id}" onclick="submitParams('${cid}')" ${dis}>Apply</button>
         </div>
@@ -541,6 +590,25 @@ function playIcon(cid, cam) {
   if (!cam.is_grabbing || paused.has(cid))
     return `<svg viewBox="0 0 24 24"><polygon points="5,3 19,12 5,21"/></svg>`;
   return `<svg viewBox="0 0 24 24"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>`;
+}
+
+// ── Reboot ────────────────────────────────────────────────────────────────
+async function rebootCamera(cid) {
+  const id = cid;
+  const btn = document.getElementById(`rb-${id}`);
+  if (btn) { btn.disabled = true; btn.style.opacity = '0.4'; }
+  paused.add(cid);
+  renderCard(cid, cameras[cid]);
+  await api(`/api/cameras/${cid}/reboot`, 'POST', {});
+  // Wait for camera to come back up then rediscover
+  await new Promise(r => setTimeout(r, 8000));
+  const list = await api('/api/cameras?discover=true');
+  list.forEach(c => { cameras[c.serial] = c; });
+  const refreshed = list.find(c => c.serial === cid);
+  if (refreshed) {
+    paused.delete(cid);
+    await autoStart(cid);
+  }
 }
 
 // ── Play / Pause (browser-side only, camera keeps grabbing) ───────────────
@@ -628,10 +696,9 @@ async function submitParams(cid) {
   const body = {};
   if (ps.exposure  != null) body.exposure_us = ps.exposure;
   if (ps.gain      != null) body.gain        = ps.gain;
-  if (ps.frameRate != null) body.frame_rate  = ps.frameRate;
   await api(`/api/cameras/${cid}/parameters`, 'POST', body);
   ps.dirty = false;
-  ['exposure','gain','frameRate'].forEach(k =>
+  ['exposure','gain'].forEach(k =>
     document.getElementById(`in-${cid}-${k}`)?.classList.remove('dirty'));
   if (btn) { btn.disabled = false; btn.textContent = 'Apply'; btn.classList.remove('dirty'); }
 }
@@ -648,9 +715,8 @@ async function refreshParams(cid) {
     if (!paramState[cid]) paramState[cid] = {};
     const ps = paramState[cid];
     if (!ps.dirty) {
-      if (p.ExposureTime)          ps.exposure  = p.ExposureTime.current;
-      if (p.Gain)                  ps.gain      = p.Gain.current;
-      if (p.AcquisitionFrameRate)  ps.frameRate = p.AcquisitionFrameRate.current;
+      if (p.ExposureTime) ps.exposure = p.ExposureTime.current;
+      if (p.Gain)         ps.gain     = p.Gain.current;
     }
     if (p._stats) updateStats(cid, p._stats);
   } catch(e) {}
@@ -673,11 +739,33 @@ async function pollStats() {
       if (p._stats) updateStats(cid, p._stats);
       const ps = paramState[cid];
       if (ps && !ps.dirty) {
-        if (p.ExposureTime)          ps.exposure  = p.ExposureTime.current;
-        if (p.Gain)                  ps.gain      = p.Gain.current;
-        if (p.AcquisitionFrameRate)  ps.frameRate = p.AcquisitionFrameRate.current;
+        if (p.ExposureTime) ps.exposure = p.ExposureTime.current;
+        if (p.Gain)         ps.gain     = p.Gain.current;
       }
     } catch(e) {}
+  }
+}
+
+// ── Tags ──────────────────────────────────────────────────────────────────
+function toggleTag(tag) {
+  if (selectedTags.has(tag)) selectedTags.delete(tag);
+  else selectedTags.add(tag);
+  document.querySelectorAll('#tag-seg .seg-btn').forEach(btn => {
+    btn.classList.toggle('active', selectedTags.has(btn.dataset.tag));
+  });
+}
+
+// ── Global FPS ────────────────────────────────────────────────────────────
+async function onGlobalFps(raw) {
+  const fps = Math.min(35, Math.max(1, Math.round(parseFloat(raw) || globalFps)));
+  document.getElementById('fps-input').value = fps;
+  globalFps = fps;
+  if (!isRecording) {
+    for (const cid of Object.keys(cameras)) {
+      if (cameras[cid].is_open) {
+        await api(`/api/cameras/${cid}/parameters`, 'POST', { frame_rate: fps });
+      }
+    }
   }
 }
 
@@ -702,9 +790,7 @@ async function toggleRecording() {
   btn.disabled = true;
   if (!isRecording) {
     if (!(await ensureStudioConnected())) { btn.disabled = false; return; }
-    const ips = Object.keys(paramState);
-    const freq = ips.length ? (paramState[ips[0]].frameRate || 30) : 30;
-    const res = await api('/api/studio/start', 'POST', { frequency_hz: freq });
+    const res = await api('/api/studio/start', 'POST', { frequency_hz: globalFps, tags: [...selectedTags] });
     if (res.ok) {
       isRecording = true;
       document.getElementById('rec-dot').classList.add('active');
@@ -736,16 +822,52 @@ async function toggleRecording() {
 }
 
 // ── Recordings tab ────────────────────────────────────────────────────────
+function updateSelectionToolbar() {
+  const toolbar = document.getElementById('rec-toolbar');
+  const count   = document.getElementById('rec-sel-count');
+  toolbar.classList.toggle('visible', selectedRecs.size > 0);
+  count.textContent = `${selectedRecs.size} selected`;
+}
+
+function toggleRecSel(event, id) {
+  event.stopPropagation(); // don't expand the row
+  if (selectedRecs.has(id)) selectedRecs.delete(id);
+  else selectedRecs.add(id);
+  const item = event.target.closest('.rec-item');
+  if (item) item.classList.toggle('selected', selectedRecs.has(id));
+  updateSelectionToolbar();
+}
+
+function clearSelection() {
+  selectedRecs.clear();
+  document.querySelectorAll('.rec-item').forEach(el => el.classList.remove('selected'));
+  document.querySelectorAll('.rec-check').forEach(cb => cb.checked = false);
+  updateSelectionToolbar();
+}
+
+async function deleteSelected() {
+  if (!selectedRecs.size) return;
+  const ids = [...selectedRecs];
+  if (!confirm(`Delete ${ids.length} recording${ids.length > 1 ? 's' : ''}?\nThis cannot be undone.`)) return;
+  for (const id of ids) {
+    const res = await api(`/api/recordings/${id}`, 'DELETE');
+    if (res.ok) selectedRecs.delete(id);
+  }
+  loadRecordings();
+}
+
 async function loadRecordings() {
   const list = document.getElementById('rec-list');
   list.innerHTML = '<div class="empty"><div class="spinner"></div>Loading…</div>';
   const recordings = await api('/api/recordings');
   if (!recordings.length) {
     list.innerHTML = '<div class="empty">No recordings yet.</div>';
+    updateSelectionToolbar();
     return;
   }
   list.innerHTML = '';
   recordings.forEach(r => list.appendChild(buildRecItem(r)));
+  updateSelectionToolbar();
 }
 
 function buildRecItem(r) {
@@ -758,14 +880,19 @@ function buildRecItem(r) {
   const dur = r.duration_seconds != null ? fmtDur(r.duration_seconds) : '—';
   const size = fmtBytes(totalBytes);
 
+  if (selectedRecs.has(r.recording_id)) el.classList.add('selected');
+
   el.innerHTML = `
     <div class="rec-item-hdr" onclick="toggleRecItem(this)">
+      <input type="checkbox" class="rec-check" ${selectedRecs.has(r.recording_id) ? 'checked' : ''}
+        onclick="toggleRecSel(event,'${r.recording_id}')">
       <span class="rec-id">${r.recording_id}</span>
       <div class="rec-pills">
         <span class="pill">${camCount} cam${camCount!==1?'s':''}</span>
         <span class="pill">${totalFrames.toLocaleString()} frames</span>
         <span class="pill">${dur}</span>
         <span class="pill">${size}</span>
+        ${(r.tags||[]).map(t=>`<span class="pill" style="color:var(--accent);border-color:#1e3a5f">${t}</span>`).join('')}
       </div>
       <div class="rec-item-hdr-sep"></div>
       <button class="del-btn" onclick="deleteRecording(event,'${r.recording_id}')" title="Delete recording">
@@ -866,10 +993,11 @@ function fmtBytes(b) {
 }
 
 async function deleteRecording(event, recordingId) {
-  event.stopPropagation(); // don't toggle the expand
+  event.stopPropagation();
   if (!confirm(`Delete recording ${recordingId}?\nThis cannot be undone.`)) return;
   const res = await api(`/api/recordings/${recordingId}`, 'DELETE');
   if (res.ok) {
+    selectedRecs.delete(recordingId);
     loadRecordings();
   } else {
     alert('Delete failed: ' + res.error);

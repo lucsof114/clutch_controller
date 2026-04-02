@@ -28,7 +28,7 @@ log = logging.getLogger("pico_controller")
 SAMPLE_INTERVAL_US = 10
 OVERVIEW_SIZE = 15000
 SAMPLES_PER_SEC = 1_000_000 / SAMPLE_INTERVAL_US
-THRESHOLD_ADC = int(3.0 * 32767.0 / 10.0)  # 3V threshold in ±10V range
+THRESHOLD_ADC = int(0.8 * 32767.0 / 10.0)  # 0.8V threshold in ±10V range (signal peaks ~1.6V)
 
 CALLBACK_TYPE = CFUNCTYPE(
     None, POINTER(POINTER(c_int16)), c_int16, c_uint32, c_int16, c_int16, c_uint32
@@ -40,9 +40,10 @@ _active_callback = None
 
 @dataclass
 class PicoResult:
-    """Raw output from PicoScope edge detection — just timestamps, no analysis."""
+    """Raw output from PicoScope edge detection."""
     timestamps_us: list[float]
     total_samples: int = 0
+    raw_samples: "np.ndarray | None" = None   # only populated in debug mode
 
 
 # ── Internal data structures ─────────────────────────────────────────────────
@@ -54,54 +55,75 @@ class _Chunk:
 @dataclass
 class _ProcessingState:
     freq_hz: float
-    edge_timestamps: list = field(default_factory=list)   # absolute sample indices
+    confirm_k: int = 5              # consecutive samples required to confirm a signal state change
+    edge_timestamps: list = field(default_factory=list)  # sample indices of confirmed falling edges
     total_samples: int = 0
-    was_above: bool = False                               # previous sample was above threshold
-    seen_high: bool = False                               # have we ever seen the signal go high?
+    signal_state: str = 'LOW'       # confirmed state: 'LOW' or 'HIGH'
+    pending_count: int = 0          # consecutive samples in the pending new state
+    pending_start: int = 0          # sample index where the pending transition began
+    peak_adc: int = 0
+    save_raw: bool = False
+    raw_chunks: list = field(default_factory=list)
 
 
-# ── Core algorithm: find falling edge, compute time delta ────────────────────
+# ── Core algorithm: k-confirmation state machine ─────────────────────────────
 def _process_chunk(chunk: _Chunk, state: _ProcessingState):
+    """
+    Detect falling edges using a k-consecutive-sample confirmation scheme.
+
+    A transition is only accepted after confirm_k consecutive samples on the
+    new side of the threshold.  The recorded timestamp is the sample index of
+    the FIRST sample that crossed the threshold (the actual edge), not the
+    k-th confirming sample.
+
+    This rejects narrow ringing spikes that don't sustain long enough to pass
+    the confirmation window without any look-ahead or period-dependent tuning.
+    """
     arr = chunk.data
     n = len(arr)
     if n == 0:
         return
 
-    above = arr >= THRESHOLD_ADC
-    below = ~above
+    chunk_max = int(arr.max())
+    if chunk_max > state.peak_adc:
+        state.peak_adc = chunk_max
+
+    if state.save_raw:
+        state.raw_chunks.append(arr.copy())
+
     base = state.total_samples
+    K = state.confirm_k
 
-    # Must see a high sample before we can count any falling edge
-    if not state.seen_high:
-        first_high = np.nonzero(above)[0]
-        if len(first_high) == 0:
-            # Entire chunk is low — skip, no edges possible
-            state.total_samples += n
-            return
-        # Start processing from the first high sample onward
-        start = int(first_high[0])
-        state.seen_high = True
-        state.was_above = True
-        if start + 1 >= n:
-            # Only the last sample was high, nothing to detect yet
-            state.total_samples += n
-            return
-        arr = arr[start:]
-        above = above[start:]
-        below = below[start:]
-        base = state.total_samples + start
-        n = len(arr)
+    for i in range(n):
+        above = int(arr[i]) >= THRESHOLD_ADC
+        sample_idx = base + i
 
-    # Detect falling edges: current sample below threshold, previous was above
-    prev = np.empty(n + 1, dtype=bool)
-    prev[0] = not state.was_above
-    prev[1:] = below
-    falling = below & ~prev[:-1]
+        if state.signal_state == 'LOW':
+            # Waiting for K consecutive HIGH samples to confirm signal went HIGH
+            if above:
+                if state.pending_count == 0:
+                    state.pending_start = sample_idx
+                state.pending_count += 1
+                if state.pending_count >= K:
+                    state.signal_state = 'HIGH'
+                    state.pending_count = 0
+            else:
+                state.pending_count = 0
 
-    for idx in np.nonzero(falling)[0]:
-        state.edge_timestamps.append(base + int(idx))
+        else:  # 'HIGH'
+            # Waiting for K consecutive LOW samples to confirm falling edge
+            if not above:
+                if state.pending_count == 0:
+                    # Record timestamp of the FIRST low sample — the actual edge
+                    state.pending_start = sample_idx
+                state.pending_count += 1
+                if state.pending_count >= K:
+                    state.edge_timestamps.append(state.pending_start)
+                    state.signal_state = 'LOW'
+                    state.pending_count = 0
+            else:
+                state.pending_count = 0
 
-    state.was_above = not below[-1]
     state.total_samples = base + n
 
 
@@ -222,15 +244,22 @@ class PicoController:
         self._is_open = False
         log.info("PicoScope closed")
 
-    def start_tracking(self, freq_hz: float):
-        """Start worker thread to detect falling edges."""
+    def start_tracking(self, freq_hz: float, debug: bool = False, confirm_k: int = 5):
+        """Start worker thread to detect falling edges.
+
+        Args:
+            freq_hz:   Expected trigger frequency (used only for diagnostics).
+            debug:     If True, collect every raw ADC sample into PicoResult.raw_samples.
+            confirm_k: Consecutive samples required on each side to confirm a transition.
+        """
         if not self._is_open:
             raise RuntimeError("PicoScope not open")
         if self._is_tracking:
             raise RuntimeError("Already tracking")
 
         self._freq_hz = freq_hz
-        self._state = _ProcessingState(freq_hz=freq_hz)
+        self._state = _ProcessingState(freq_hz=freq_hz, confirm_k=confirm_k,
+                                       save_raw=debug)
         self._worker_stop.clear()
         self._worker_thread = threading.Thread(
             target=_worker_loop,
@@ -257,10 +286,26 @@ class PicoController:
         state = self._state
         timestamps_us = [t * SAMPLE_INTERVAL_US for t in state.edge_timestamps]
 
+        raw_samples = None
+        if state.save_raw and state.raw_chunks:
+            raw_samples = np.concatenate(state.raw_chunks)
+
         result = PicoResult(
             timestamps_us=timestamps_us,
             total_samples=state.total_samples,
+            raw_samples=raw_samples,
         )
+
+        peak_v = state.peak_adc * 10.0 / 32767.0
+        if state.peak_adc == 0:
+            log.warning("PicoScope: peak ADC=0 — Channel A appears to have no signal. "
+                        "Check that the probe is connected to the Arduino trigger output pin.")
+        elif len(timestamps_us) == 0:
+            log.warning("PicoScope: peak ADC=%d (%.2fV) — signal present but no edges confirmed "
+                        "(threshold=%.1fV, confirm_k=%d). Check signal level.",
+                        state.peak_adc, peak_v, THRESHOLD_ADC * 10.0 / 32767.0, state.confirm_k)
+        else:
+            log.info("PicoScope: peak ADC=%d (%.2fV)", state.peak_adc, peak_v)
 
         log.info("PicoScope tracking stopped: %d edges, %d total samples",
                  len(timestamps_us), state.total_samples)

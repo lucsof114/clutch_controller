@@ -5,11 +5,13 @@ Requires MVS SDK installed at /opt/MVS with Python bindings.
 
 import sys
 import queue
+import struct
 import threading
 import time
 import logging
 import ctypes
 from ctypes import byref, sizeof, memset, memmove, cast, POINTER, c_ubyte
+from dataclasses import dataclass
 
 import numpy as np
 import cv2
@@ -22,6 +24,36 @@ from MvCameraControl_class import *
 log = logging.getLogger("camera_manager")
 
 MONO8 = 0x01080001
+
+# ── Raw frame container (pre-decode, for zero-copy recording) ─────────────────
+_FRAME_MAGIC = b'HBF1'
+_FRAME_HEADER_FMT = '<4sIIII'   # magic, width, height, pixel_type, data_len
+_FRAME_HEADER_SIZE = struct.calcsize(_FRAME_HEADER_FMT)
+
+
+@dataclass
+class RawFrame:
+    """Compressed (HB) or raw (Mono8) frame bytes, ready to write straight to disk."""
+    data: bytes
+    width: int
+    height: int
+    pixel_type: int
+    is_hb: bool
+
+    def to_hbf_bytes(self) -> bytes:
+        header = struct.pack(_FRAME_HEADER_FMT,
+                             _FRAME_MAGIC, self.width, self.height,
+                             self.pixel_type, len(self.data))
+        return header + self.data
+
+    @staticmethod
+    def from_hbf_bytes(buf: bytes) -> "RawFrame":
+        magic, w, h, ptype, dlen = struct.unpack_from(_FRAME_HEADER_FMT, buf)
+        if magic != _FRAME_MAGIC:
+            raise ValueError(f"Bad HBF magic: {magic!r}")
+        data = buf[_FRAME_HEADER_SIZE: _FRAME_HEADER_SIZE + dlen]
+        return RawFrame(data=data, width=w, height=h, pixel_type=ptype,
+                        is_hb=(ptype & 0x80000000) != 0)
 
 
 def _ip_int_to_str(ip_int):
@@ -55,8 +87,7 @@ class CameraInstance:
         self.use_hb = True
         self.trigger_mode = False  # False = free run, True = triggered
 
-        self._latest_frame = None   # JPEG bytes
-        self._latest_raw = None     # numpy array
+        self._latest_raw = None     # numpy array (for snapshots)
         self._frame_lock = threading.Lock()
 
         self._acq_thread = None
@@ -66,6 +97,9 @@ class CameraInstance:
         self._acq_fps = 0.0
         self._frame_count = 0
         self._lost_packets = 0
+
+        self._stream_queues: set[queue.Queue] = set()
+        self._stream_lock = threading.Lock()
 
     def open(self):
         if self.is_open:
@@ -84,9 +118,6 @@ class CameraInstance:
         pkt = self.cam.MV_CC_GetOptimalPacketSize()
         if pkt > 0:
             self.cam.MV_CC_SetIntValue("GevSCPSPacketSize", pkt)
-
-        # Zero inter-packet delay for max throughput
-        self.cam.MV_CC_SetIntValue("GevSCPD", 0)
 
         # Free-run mode
         self.cam.MV_CC_SetEnumValue("TriggerMode", MV_TRIGGER_MODE_OFF)
@@ -121,6 +152,23 @@ class CameraInstance:
         self.is_open = False
         self.cam = None
         log.info("Closed camera %s", self.ip)
+
+    def reboot(self):
+        """Send DeviceReset to the camera then close the handle. Rediscover to reconnect."""
+        if not self.is_open:
+            self.open()
+        if self.is_grabbing:
+            self.stop_grabbing()
+        ret = self.cam.MV_CC_SetCommandValue("DeviceReset")
+        if ret != MV_OK:
+            raise RuntimeError(f"DeviceReset failed for {self.ip}: 0x{ret:08X}")
+        log.info("Reboot command sent to camera %s", self.ip)
+        # Close handle immediately — camera is going down
+        self.cam.MV_CC_CloseDevice()
+        self.cam.MV_CC_DestroyHandle()
+        self.is_open = False
+        self.is_grabbing = False
+        self.cam = None
 
     def configure(self, exposure_us=None, gain=None, frame_rate=None,
                   use_hb=None, gain_auto=None, exposure_auto=None,
@@ -227,7 +275,7 @@ class CameraInstance:
         stOutFrame = MV_FRAME_OUT()
         memset(byref(stOutFrame), 0, sizeof(stOutFrame))
 
-        # Pre-allocate HB decode buffer (worst case: full uncompressed frame)
+        # Pre-allocate HB decode buffer — only used for streaming, not for recording
         decode_buf_size = 2448 * 2048 * 3
         decode_buf = (c_ubyte * decode_buf_size)()
 
@@ -242,48 +290,63 @@ class CameraInstance:
             try:
                 info = stOutFrame.stFrameInfo
                 w, h = info.nWidth, info.nHeight
+                is_hb = _is_hb_pixel_format(info.enPixelType)
 
-                if _is_hb_pixel_format(info.enPixelType):
-                    # HB decode
-                    stDecode = MV_CC_HB_DECODE_PARAM()
-                    stDecode.pSrcBuf = stOutFrame.pBufAddr
-                    stDecode.nSrcLen = info.nFrameLen
-                    stDecode.pDstBuf = decode_buf
-                    stDecode.nDstBufSize = decode_buf_size
+                # ── Copy raw bytes immediately (fast memcpy, no decode) ────────
+                n_bytes = info.nFrameLen
+                raw_buf = (c_ubyte * n_bytes)()
+                memmove(raw_buf, stOutFrame.pBufAddr, n_bytes)
+                raw_frame = RawFrame(
+                    data=bytes(raw_buf),
+                    width=w, height=h,
+                    pixel_type=info.enPixelType,
+                    is_hb=is_hb,
+                )
 
-                    dec_ret = self.cam.MV_CC_HBDecode(stDecode)
-                    if dec_ret != MV_OK:
-                        log.warning("HBDecode failed on %s: 0x%08X", self.ip, dec_ret)
-                        continue
-
-                    # Decoded data → numpy
-                    n_bytes = stDecode.nDstBufLen
-                    frame = np.ctypeslib.as_array(decode_buf, shape=(n_bytes,))
-                    frame = frame[:w * h].reshape((h, w)).copy()
-                else:
-                    # Raw Mono8 — must copy before FreeImageBuffer
-                    src = ctypes.cast(stOutFrame.pBufAddr, ctypes.POINTER(c_ubyte * (w * h))).contents
-                    frame = np.frombuffer(src, dtype=np.uint8).reshape((h, w)).copy()
-
-                # Push to recording queue if recording is active
+                # ── Recording: push raw frame (no decode, no PNG) ─────────────
                 rq = self._record_queue
                 if rq is not None:
                     try:
-                        rq.put_nowait(frame)
+                        rq.put_nowait(raw_frame)
                     except queue.Full:
                         log.debug("Record queue full for %s — frame dropped", self.ip)
-
-                # JPEG encode for streaming
-                _, jpeg_buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
-                jpeg_bytes = jpeg_buf.tobytes()
-
-                with self._frame_lock:
-                    self._latest_frame = jpeg_bytes
-                    self._latest_raw = frame
 
                 self._frame_count += 1
                 self._lost_packets += info.nLostPacket
                 fps_counter += 1
+
+                # ── Streaming: decode only when someone is watching ───────────
+                with self._stream_lock:
+                    has_subscribers = bool(self._stream_queues)
+
+                if has_subscribers:
+                    frame = None
+                    if is_hb:
+                        stDecode = MV_CC_HB_DECODE_PARAM()
+                        stDecode.pSrcBuf = cast(raw_buf, POINTER(c_ubyte))
+                        stDecode.nSrcLen = n_bytes
+                        stDecode.pDstBuf = decode_buf
+                        stDecode.nDstBufSize = decode_buf_size
+                        dec_ret = self.cam.MV_CC_HBDecode(stDecode)
+                        if dec_ret == MV_OK:
+                            decoded_len = stDecode.nDstBufLen
+                            frame = np.ctypeslib.as_array(decode_buf, shape=(decoded_len,))
+                            frame = frame[:w * h].reshape((h, w)).copy()
+                        else:
+                            log.debug("HBDecode failed (streaming) on %s: 0x%08X", self.ip, dec_ret)
+                    else:
+                        frame = np.frombuffer(bytes(raw_buf), dtype=np.uint8).reshape((h, w))
+
+                    if frame is not None:
+                        with self._frame_lock:
+                            self._latest_raw = frame
+                        with self._stream_lock:
+                            queues = list(self._stream_queues)
+                        for sq in queues:
+                            try:
+                                sq.put_nowait(frame)
+                            except queue.Full:
+                                pass
 
                 # FPS calculation every second
                 now = time.monotonic()
@@ -345,9 +408,17 @@ class CameraInstance:
         if ret != MV_OK:
             raise RuntimeError(f"Failed to set {name}={value} on {self.ip}: 0x{ret:08X}")
 
-    def get_latest_jpeg(self):
-        with self._frame_lock:
-            return self._latest_frame
+    def subscribe_stream(self) -> queue.Queue:
+        """Return a Queue(maxsize=1) that receives JPEG bytes for each new frame.
+        Frames are dropped (not queued) when the consumer is too slow."""
+        q = queue.Queue(maxsize=1)
+        with self._stream_lock:
+            self._stream_queues.add(q)
+        return q
+
+    def unsubscribe_stream(self, q: queue.Queue):
+        with self._stream_lock:
+            self._stream_queues.discard(q)
 
     def get_snapshot_jpeg(self, quality=90):
         with self._frame_lock:
@@ -429,6 +500,13 @@ class CameraManager:
 
     def list_cameras(self):
         return [cam.status() for cam in self._cameras.values()]
+
+    def reboot_camera(self, camera_id):
+        cam = self.get_camera(camera_id)
+        cam.reboot()
+        # Remove from registry so rediscover() creates a fresh instance
+        del self._cameras[camera_id]
+        log.info("Camera %s removed from registry after reboot", camera_id)
 
     def shutdown(self):
         for cam in self._cameras.values():

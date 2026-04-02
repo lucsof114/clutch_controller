@@ -11,6 +11,7 @@ import json
 import logging
 import shutil
 import threading
+import time
 
 from studio.arduino_controller.client import TriggerController
 from studio.camera_manager import CameraManager
@@ -78,7 +79,8 @@ class StudioController:
     # ── Recording lifecycle ──────────────────────────────────────────────────
 
     def start_recording(self, frequency_hz: float = 30.0,
-                        camera_ids: list[str] | None = None) -> str:
+                        camera_ids: list[str] | None = None,
+                        tags: list[str] | None = None) -> str:
         with self._lock:
             if self._recording:
                 raise RuntimeError("Already recording")
@@ -101,6 +103,10 @@ class StudioController:
                 cam = self._cam_mgr.get_camera(cid)
                 cam.configure(trigger_mode="line0")
 
+            # Flush the one spurious free-run frame emitted on Line0 arm transition.
+            # _record_queue is still None here so it is silently discarded.
+            time.sleep(0.3)
+
             # 4. Build recording metadata from current camera state
             camera_infos = []
             for cid in camera_ids:
@@ -121,7 +127,7 @@ class StudioController:
 
             # 5. Start recording (spawns saver threads)
             try:
-                recording_id, queues = self._recording_manager.start(camera_ids, camera_infos)
+                recording_id, queues = self._recording_manager.start(camera_ids, camera_infos, tags=tags)
                 for cid, q in queues.items():
                     self._cam_mgr.get_camera(cid)._record_queue = q
             except Exception:
@@ -161,7 +167,7 @@ class StudioController:
 
             warnings: list[str] = []
 
-            # 1. Stop Arduino
+            # 1. Stop Arduino (no more triggers from here)
             try:
                 ok = self._trigger.stop()
                 if not ok:
@@ -179,7 +185,9 @@ class StudioController:
             except Exception as e:
                 warnings.append(f"Arduino stop error: {e}")
 
-            # 2. Stop PicoScope (before cameras so we capture all edges)
+            time.sleep(0.4)
+
+            # 2. Stop PicoScope — all real edges are now accounted for
             pico_result: PicoResult | None = None
             try:
                 pico_result = self._pico.stop_tracking()
@@ -193,7 +201,8 @@ class StudioController:
             if pico_result is not None:
                 sync_meta = self._build_sync_metadata(pico_result)
 
-            # 4. Disconnect recording queues from cameras, then drain saver threads
+            # 4. Disconnect recording queues (camera buffers already drained above),
+            #    then drain saver threads
             self._stop_recording_queues(self._camera_ids)
             result = {}
             try:
@@ -204,7 +213,7 @@ class StudioController:
             except Exception as e:
                 warnings.append(f"stop_recording error: {e}")
 
-            # 5. Disarm cameras (back to free run)
+            # 5. Disarm cameras (back to free run) — only after savers have finished
             for cid in self._camera_ids:
                 try:
                     self._cam_mgr.get_camera(cid).configure(trigger_mode=False)

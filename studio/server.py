@@ -4,6 +4,7 @@ import time
 import logging
 import atexit
 
+import cv2
 from flask import Flask, jsonify, request, Response, render_template
 
 from studio.studio_controller import StudioController
@@ -56,6 +57,15 @@ def close_camera(camera_id):
         return jsonify({"ok": False, "error": str(e)}), 400
 
 
+@app.route("/api/cameras/<camera_id>/reboot", methods=["POST"])
+def reboot_camera(camera_id):
+    try:
+        studio._cam_mgr.reboot_camera(camera_id)
+        return jsonify({"ok": True})
+    except (KeyError, RuntimeError) as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+
 @app.route("/api/cameras/<camera_id>/start", methods=["POST"])
 def start_grabbing(camera_id):
     try:
@@ -102,16 +112,23 @@ def stream(camera_id):
         return str(e), 404
 
     def generate():
-        while True:
-            jpeg = cam.get_latest_jpeg()
-            if jpeg:
+        q = cam.subscribe_stream()
+        try:
+            while True:
+                try:
+                    frame = q.get(timeout=5.0)
+                except Exception:
+                    continue
+                _, jpeg_buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+                jpeg = jpeg_buf.tobytes()
                 yield (
                     b"--frame\r\n"
                     b"Content-Type: image/jpeg\r\n"
                     b"Content-Length: " + str(len(jpeg)).encode() + b"\r\n"
                     b"\r\n" + jpeg + b"\r\n"
                 )
-            time.sleep(1 / 15)
+        finally:
+            cam.unsubscribe_stream(q)
 
     return Response(generate(), mimetype="multipart/x-mixed-replace; boundary=frame")
 
@@ -135,9 +152,11 @@ def start_recording():
     data = request.get_json(silent=True) or {}
     frequency_hz = data.get("frequency_hz", 30.0)
     camera_ids = data.get("camera_ids")
+    tags = data.get("tags") or []
     try:
         recording_id = studio.start_recording(frequency_hz=frequency_hz,
-                                               camera_ids=camera_ids)
+                                               camera_ids=camera_ids,
+                                               tags=tags)
         return jsonify({"ok": True, "recording_id": recording_id})
     except RuntimeError as e:
         return jsonify({"ok": False, "error": str(e)}), 400
@@ -190,9 +209,11 @@ def studio_start():
     data = request.get_json(silent=True) or {}
     frequency_hz = data.get("frequency_hz", 30.0)
     camera_ids = data.get("camera_ids")
+    tags = data.get("tags") or []
     try:
         recording_id = studio.start_recording(frequency_hz=frequency_hz,
-                                               camera_ids=camera_ids)
+                                               camera_ids=camera_ids,
+                                               tags=tags)
         return jsonify({"ok": True, "recording_id": recording_id})
     except RuntimeError as e:
         return jsonify({"ok": False, "error": str(e)}), 400

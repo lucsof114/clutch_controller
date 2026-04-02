@@ -45,6 +45,7 @@ class SyncMetadata:
 class RecordingMetadata:
     recording_id: str
     created_time: str                            # ISO 8601 UTC — when start_recording was called
+    tags: list[str] = field(default_factory=list) # user-assigned labels e.g. ["intrinsic", "data"]
     start_time: Optional[str] = None             # ISO 8601 UTC — first frame received
     end_time: Optional[str] = None               # ISO 8601 UTC — last frame received
     duration_seconds: Optional[float] = None
@@ -55,10 +56,12 @@ class RecordingMetadata:
     # ── factory ──────────────────────────────────────────────────────────────
 
     @classmethod
-    def start(cls, recording_id: str, camera_infos: list[CameraRecordingInfo]) -> "RecordingMetadata":
+    def start(cls, recording_id: str, camera_infos: list[CameraRecordingInfo],
+              tags: list[str] | None = None) -> "RecordingMetadata":
         return cls(
             recording_id=recording_id,
             created_time=_now_iso(),
+            tags=tags or [],
             cameras=camera_infos,
         )
 

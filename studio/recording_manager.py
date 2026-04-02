@@ -1,4 +1,9 @@
-"""RecordingManager — saver-thread-per-camera PNG recording system."""
+"""RecordingManager — saver-thread-per-camera raw-HBF recording system.
+
+Frames are written as .hbf files (header + raw camera bytes) without any
+CPU-heavy decode or PNG compression.  Run scrap/decode_recording.py in
+post-processing to convert to PNG.
+"""
 
 from __future__ import annotations
 
@@ -6,10 +11,8 @@ import json
 import queue
 import threading
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-
-import cv2
 
 from studio.recording_metadata import CameraRecordingInfo, RecordingMetadata, SyncMetadata
 
@@ -36,6 +39,9 @@ class RecordingManager:
         self._saver_threads: dict[str, threading.Thread] = {}
         self._frame_counts: dict[str, int] = {}
         self._size_bytes: dict[str, int] = {}
+        self._first_frame_time: str | None = None
+        self._last_frame_time: str | None = None
+        self._time_lock = threading.Lock()
 
     @property
     def is_recording(self) -> bool:
@@ -53,6 +59,7 @@ class RecordingManager:
         self,
         camera_ids: list[str],
         camera_infos: list[CameraRecordingInfo] | None = None,
+        tags: list[str] | None = None,
     ) -> tuple[str, dict[str, queue.Queue]]:
         if self.is_recording:
             raise RuntimeError("Already recording")
@@ -64,11 +71,13 @@ class RecordingManager:
             camera_infos = [CameraRecordingInfo(ip=cid, model="", serial="")
                             for cid in camera_ids]
 
-        self._metadata = RecordingMetadata.start(recording_id, camera_infos)
+        self._metadata = RecordingMetadata.start(recording_id, camera_infos, tags=tags)
         self._queues = {}
         self._saver_threads = {}
         self._frame_counts = {}
         self._size_bytes = {}
+        self._first_frame_time = None
+        self._last_frame_time = None
 
         # Build serial → dir_name lookup for directory naming
         self._serial_map = {info.serial: info.serial
@@ -112,7 +121,8 @@ class RecordingManager:
 
         # Finalise and persist metadata
         if self._metadata is not None:
-            self._metadata.finalise(self._frame_counts, self._size_bytes)
+            self._metadata.finalise(self._frame_counts, self._size_bytes,
+                                    self._first_frame_time, self._last_frame_time)
             if sync is not None:
                 self._metadata.sync = sync
             if warnings:
@@ -146,7 +156,6 @@ class RecordingManager:
     def _saver_loop(self, camera_id: str, q: queue.Queue, base_dir: Path):
         n = 0
         total_bytes = 0
-        first = True  # skip first frame (garbage from trigger arming)
 
         while True:
             try:
@@ -161,25 +170,20 @@ class RecordingManager:
                          camera_id, n, total_bytes / 1_048_576)
                 return
 
-            if first:
-                first = False
-                q.task_done()
-                log.info("Skipped first frame for %s (trigger arming garbage)", camera_id)
-                continue
+            now = datetime.now(timezone.utc).isoformat()
+            with self._time_lock:
+                if self._first_frame_time is None:
+                    self._first_frame_time = now
+                self._last_frame_time = now
 
             frame_id = _make_frame_id(n)
             frame_dir = base_dir / frame_id
             frame_dir.mkdir(exist_ok=True)
-            path = str(frame_dir / "frame.png")
+            path = frame_dir / "frame.hbf"
 
-            ok = cv2.imwrite(path, frame)
-            if ok:
-                try:
-                    total_bytes += Path(path).stat().st_size
-                except OSError:
-                    pass
-            else:
-                log.error("cv2.imwrite failed: %s", path)
+            hbf_bytes = frame.to_hbf_bytes()
+            path.write_bytes(hbf_bytes)
+            total_bytes += len(hbf_bytes)
 
             q.task_done()
             n += 1
