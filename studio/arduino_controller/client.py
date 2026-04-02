@@ -179,6 +179,12 @@ if __name__ == "__main__":
     with TriggerController(args.port) as controller:
         if args.command == "start":
             controller.start(args.freq)
+            print("Ctrl+C to stop")
+            try:
+                while True:
+                    time.sleep(1)
+            except KeyboardInterrupt:
+                print()
         elif args.command == "stop":
             controller.stop()
         elif args.command == "status":
