@@ -10,7 +10,7 @@ Multi-camera control system for Hikrobot MV-CS050-10GM-PRO GigE cameras.
 
 ```bash
 export MVCAM_COMMON_RUNENV=/opt/MVS/lib  # already in ~/.zshrc
-source venv/bin/activate
+source scrap/venv/bin/activate
 pip install -e .
 python -m studio.server
 ```
@@ -29,6 +29,13 @@ studio/                          — installable Python package (pip install -e 
   pico_controller.py             — PicoScope sync signal validation
   arduino_controller/            — Arduino PWM trigger (firmware + serial client)
   templates/index.html           — Web UI (cameras tab + recordings tab, self-contained)
+cameras/
+  camera.py                      — TorchCam: differentiable camera model (intrinsics + pose as nn.Parameters)
+calibration/
+  boards.json                    — ChArUco board configs (square_length, marker_length, layout, aruco_dict)
+  marker.py                      — MarkerDetector: parallel ChArUco + ArUco detection
+  intrinsic_calibration.py       — per-camera intrinsics via Adam; saves to clutch_db/calibration/intrinsics/
+  extrinsic_calibration.py       — multi-camera extrinsics via BFS init + Adam; saves to clutch_db/calibration/extrinsics/
 ```
 
 ## SDK notes
@@ -55,13 +62,20 @@ studio/                          — installable Python package (pip install -e 
 
 ```
 ~/Documents/clutch/clutch_db/
-  <recording_id>/          # e.g. 20260314_173433
-    metadata.json
-    <serial>/              # e.g. DA9128029
-      000000/frame.png
-      000001/frame.png
+  recordings/
+    <recording_id>/        # e.g. 20260515_224247
+      metadata.json
+      <serial>/            # e.g. DA9128029
+        000000/
+          frame.hbf        # raw HB-compressed frame (always)
+          frame.png        # decoded PNG (run scrap/decode_recording.py post-capture)
+        000001/
+          ...
+  calibration/
+    intrinsics/<serial>/<recording_id>/results.json   # TorchCam.to_dict() (intrinsics only, pose=identity)
+    extrinsics/<recording_id>/results.json            # {cam_id: TorchCam.to_dict()} (intrinsics + pose)
   catalog/
-    <recording_id>.json    # flat copy for fast listing
+    <recording_id>.json    # flat copy for fast listing (written by recording_manager.stop())
 ```
 
 ## UI behaviour

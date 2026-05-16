@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
+from torch.utils.tensorboard import SummaryWriter
 
 # ensure project root is on path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -209,6 +210,87 @@ def _init_pnp(
     return rvec, tvec, mean_err
 
 
+def _eval_test_rmse(
+    cam: TorchCam,
+    test_frame_data: Dict[int, FrameObservations],
+    dev: torch.device,
+    rmse_threshold: float = 1.0,
+    max_inner_epochs: int = 250,
+    inner_lr: float = 1e-3,
+) -> float:
+    """PnP-init + pose-only optimization on test frames, return RMSE at convergence."""
+    fx = cam.fx.item(); fy = cam.fy.item()
+    cx = cam.cx.item(); cy = cam.cy.item()
+    k = cam.dist_coeffs.detach().cpu().numpy()
+    camera_matrix = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float64)
+
+    rvec_list, tvec_list, valid_fidx = [], [], []
+    for fidx, obs in test_frame_data.items():
+        result = _init_pnp(obs, camera_matrix, k)
+        if result is None:
+            continue
+        rvec, tvec, _ = result
+        rvec_list.append(rvec.flatten())
+        tvec_list.append(tvec.flatten())
+        valid_fidx.append(fidx)
+
+    if not rvec_list:
+        return float("inf")
+
+    test_fidx_to_int = {fidx: i for i, fidx in enumerate(valid_fidx)}
+    test_poses = BoardPoses(np.stack(rvec_list), np.stack(tvec_list))
+    test_poses.to(dev)
+
+    obs_rows = []
+    for fidx in valid_fidx:
+        obs = test_frame_data[fidx]
+        fi = test_fidx_to_int[fidx]
+        for pts_3d, pts_2d, ptype in [
+            (obs.charuco_pts_3d, obs.charuco_pts_2d, 0),
+            (obs.aruco_pts_3d, obs.aruco_pts_2d, 1),
+        ]:
+            if pts_3d.shape[0] == 0:
+                continue
+            rows = torch.zeros(pts_3d.shape[0], 7, dtype=torch.float64)
+            rows[:, 0] = fi
+            rows[:, 1:4] = pts_3d
+            rows[:, 4:6] = pts_2d
+            rows[:, 6] = ptype
+            obs_rows.append(rows)
+
+    local_obs = torch.cat(obs_rows).to(dev)
+    fi_t = local_obs[:, 0].long()
+    pts3_t = local_obs[:, 1:4]
+    pts2_t = local_obs[:, 4:6]
+
+    # Freeze cam params during inner optimization
+    for p in [cam.fx, cam.fy, cam.cx, cam.cy, cam.dist_coeffs]:
+        p.requires_grad_(False)
+
+    pose_opt = torch.optim.Adam(test_poses.parameters(), lr=inner_lr)
+    rmse = float("inf")
+
+    for _ in range(max_inner_epochs):
+        pose_opt.zero_grad()
+        cam_pts = test_poses.transform(fi_t, pts3_t)
+        proj = cam.project_camera_points(cam_pts)
+        loss = ((proj - pts2_t) ** 2).sum()
+        loss.backward()
+        pose_opt.step()
+
+        with torch.no_grad():
+            rmse = float(((proj.detach() - pts2_t) ** 2).sum(dim=1).mean().sqrt())
+
+        if rmse < rmse_threshold:
+            break
+
+    # Restore cam gradients
+    for p in [cam.fx, cam.fy, cam.cx, cam.cy, cam.dist_coeffs]:
+        p.requires_grad_(True)
+
+    return rmse
+
+
 def _compute_metrics(
     cam: TorchCam,
     board_poses: BoardPoses,
@@ -341,23 +423,26 @@ def run_intrinsic_calibration(
     recording_dir: str,
     camera_serial: str,
     board_name: Optional[str] = None,
-    num_epochs: int = 500,
+    num_epochs: int = 1000,
     max_workers: int = 40,
     device: Optional[str] = None,
-    lr_cam: float = 0.5,
-    lr_dist: float = 0.01,
-    lr_poses: float = 0.003,
     huber_charuco_delta: float = 0.5,
     huber_aruco_delta: float = 3.0,
     batch_size: int = 100000,
     aruco_weight: float = 1.0,
     detections_df: Optional[pd.DataFrame] = None,
     pnp_reproj_threshold: float = 3.0,
+    log_dir: Optional[str] = None,
 ) -> dict:
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
     dev = torch.device(device)
     print(f"Using device: {dev}")
+
+    if log_dir is None:
+        log_dir = os.path.join("/tmp/clutch_tb", camera_serial)
+    writer = SummaryWriter(log_dir=log_dir)
+    print(f"TensorBoard log dir: {log_dir}")
 
     # -- Step A: Detection --------------------------------------------------
     if detections_df is not None:
@@ -435,10 +520,20 @@ def run_intrinsic_calibration(
     board_poses = BoardPoses(np.stack(rvec_list), np.stack(tvec_list))
     board_poses.to(dev)
 
-    # Flatten all observations: (frame_int, pt_3d[3], pt_2d[2], type)
+    # 80/20 train/test split at frame level
+    rng = np.random.default_rng(42)
+    perm = rng.permutation(len(fidx_order))
+    n_train = int(len(fidx_order) * 0.8)
+    train_fidx_set = {fidx_order[i] for i in perm[:n_train]}
+    test_fidx_set  = {fidx_order[i] for i in perm[n_train:]}
+    print(f"Split: {len(train_fidx_set)} train frames, {len(test_fidx_set)} test frames")
+
+    # Flatten train observations: (frame_int, pt_3d[3], pt_2d[2], type)
     # type: 0=charuco, 1=aruco
-    all_obs_rows = []
+    obs_rows = []
     for fidx, obs in frame_data.items():
+        if fidx not in train_fidx_set:
+            continue
         fi = fidx_to_int[fidx]
         for pts_3d, pts_2d, ptype in [
             (obs.charuco_pts_3d, obs.charuco_pts_2d, 0),
@@ -452,27 +547,32 @@ def run_intrinsic_calibration(
             rows[:, 1:4] = pts_3d
             rows[:, 4:6] = pts_2d
             rows[:, 6] = ptype
-            all_obs_rows.append(rows)
+            obs_rows.append(rows)
 
-    all_obs = torch.cat(all_obs_rows, dim=0).to(dev)
-    dataset = torch.utils.data.TensorDataset(all_obs)
-    n_charuco = int((all_obs[:, 6] == 0).sum())
-    n_aruco = int((all_obs[:, 6] == 1).sum())
-    print(f"\nTotal observations: {len(all_obs)} (charuco: {n_charuco}, aruco: {n_aruco})")
+    train_obs = torch.cat(obs_rows, dim=0).to(dev)
+    dataset = torch.utils.data.TensorDataset(train_obs)
+    n_charuco = int((train_obs[:, 6] == 0).sum())
+    n_aruco   = int((train_obs[:, 6] == 1).sum())
+    print(f"Train observations: {len(train_obs)} (charuco: {n_charuco}, aruco: {n_aruco})")
 
     huber_charuco = nn.HuberLoss(reduction="sum", delta=huber_charuco_delta)
     huber_aruco = nn.HuberLoss(reduction="sum", delta=huber_aruco_delta)
 
     optimizer = torch.optim.Adam([
-        {"params": [cam.fx, cam.fy, cam.cx, cam.cy], "lr": lr_cam},
-        {"params": [cam.dist_coeffs], "lr": lr_dist},
-        {"params": board_poses.parameters(), "lr": lr_poses},
-    ])
+        cam.fx, cam.fy, cam.cx, cam.cy, cam.dist_coeffs, *board_poses.parameters()
+    ], lr=1e-3)
+    scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, schedulers=[
+        torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1.0, end_factor=0.01, total_iters=500),
+        torch.optim.lr_scheduler.ConstantLR(optimizer, factor=0.01, total_iters=num_epochs),
+    ], milestones=[500])
     loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
     best_rmse = float("inf")
     best_cam_state = None
     best_poses_state = None
+    test_frame_data = {fidx: obs for fidx, obs in frame_data.items() if fidx in test_fidx_set}
+    last_test_rmse = float("inf")
+    test_eval_interval = 50
 
     print(f"Optimizing ({num_epochs} epochs, {len(loader)} batches/epoch, bs={batch_size})...")
     for epoch in range(num_epochs):
@@ -500,6 +600,10 @@ def run_intrinsic_calibration(
                 loss = loss + aruco_weight * huber_aruco(proj[aruco_mask], pts_2d[aruco_mask])
 
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(
+                [cam.fx, cam.fy, cam.cx, cam.cy, cam.dist_coeffs, *board_poses.parameters()],
+                max_norm=10.0,
+            )
             optimizer.step()
 
             # track true RMSE (no grad needed, detach)
@@ -508,24 +612,46 @@ def run_intrinsic_calibration(
                 epoch_sq_err += sq_err
                 epoch_n += len(batch)
 
-        rmse = np.sqrt(epoch_sq_err / epoch_n)
-        if rmse < best_rmse:
-            best_rmse = rmse
-            best_cam_state = {k: v.clone() for k, v in cam.state_dict().items()}
-            best_poses_state = {k: v.clone() for k, v in board_poses.state_dict().items()}
+        train_rmse = np.sqrt(epoch_sq_err / epoch_n)
 
-        if epoch % 50 == 0 or epoch == num_epochs - 1:
-            print(f"  epoch {epoch:>4d}  rmse={rmse:.4f} px  best={best_rmse:.4f} px  "
+        if epoch % test_eval_interval == 0 or epoch == num_epochs - 1:
+            last_test_rmse = _eval_test_rmse(cam, test_frame_data, dev)
+            if last_test_rmse < best_rmse:
+                best_rmse = last_test_rmse
+                best_cam_state = {k: v.clone() for k, v in cam.state_dict().items()}
+                best_poses_state = {k: v.clone() for k, v in board_poses.state_dict().items()}
+            writer.add_scalar("reproj/test_rmse", last_test_rmse, epoch)
+            writer.add_scalar("reproj/best_test_rmse", best_rmse, epoch)
+
+        scheduler.step()
+        writer.add_scalar("reproj/train_rmse", train_rmse, epoch)
+        writer.add_scalar("intrinsics/fx", cam.fx.item(), epoch)
+        writer.add_scalar("intrinsics/fy", cam.fy.item(), epoch)
+        writer.add_scalar("intrinsics/cx", cam.cx.item(), epoch)
+        writer.add_scalar("intrinsics/cy", cam.cy.item(), epoch)
+        k1, k2, t1, t2, k3 = cam.dist_coeffs.detach().cpu().tolist()
+        writer.add_scalar("distortion/k1", k1, epoch)
+        writer.add_scalar("distortion/k2", k2, epoch)
+        writer.add_scalar("distortion/k3", k3, epoch)
+        writer.add_scalar("distortion/t1", t1, epoch)
+        writer.add_scalar("distortion/t2", t2, epoch)
+        writer.add_scalar("lr", scheduler.get_last_lr()[0], epoch)
+
+        if epoch % test_eval_interval == 0 or epoch == num_epochs - 1:
+            print(f"  epoch {epoch:>4d}  train={train_rmse:.4f} px  test={last_test_rmse:.4f} px  "
+                  f"best_test={best_rmse:.4f} px  "
                   f"fx={cam.fx.item():.1f} fy={cam.fy.item():.1f} "
                   f"cx={cam.cx.item():.1f} cy={cam.cy.item():.1f}")
 
     # restore best checkpoint
     cam.load_state_dict(best_cam_state)
     board_poses.load_state_dict(best_poses_state)
-    print(f"\nRestored best model (rmse={best_rmse:.4f} px)")
+    writer.close()
+    print(f"\nRestored best model (test rmse={best_rmse:.4f} px)")
 
-    # -- Step E: Metrics ----------------------------------------------------
-    metrics = _compute_metrics(cam, board_poses, frame_data, fidx_to_int)
+    # -- Step E: Metrics (test set only) ------------------------------------
+    test_frame_data = {fidx: obs for fidx, obs in frame_data.items() if fidx in test_fidx_set}
+    metrics = _compute_metrics(cam, board_poses, test_frame_data, fidx_to_int)
     _print_report(metrics)
 
     return {
@@ -542,6 +668,21 @@ def run_intrinsic_calibration(
 
 if __name__ == "__main__":
     import sys
-    rec_dir = sys.argv[1] if len(sys.argv) > 1 else "scrap/20260321_180029"
-    serial = sys.argv[2] if len(sys.argv) > 2 else "DA9128029"
-    run_intrinsic_calibration(rec_dir, serial)
+    if len(sys.argv) < 3:
+        print("Usage: python calibration/intrinsic_calibration.py <recording_dir> <camera_serial> [epochs]")
+        sys.exit(1)
+
+    rec_dir = Path(sys.argv[1]).resolve()
+    serial  = sys.argv[2]
+    epochs  = int(sys.argv[3]) if len(sys.argv) > 3 else 1000
+
+    result = run_intrinsic_calibration(str(rec_dir), serial, num_epochs=epochs)
+
+    rec_id  = rec_dir.name
+    db_dir  = rec_dir.parent.parent  # clutch_db/recordings/{rec_id} -> clutch_db
+    out_dir = db_dir / "calibration" / "intrinsics" / serial / rec_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / "results.json"
+    with open(out_path, "w") as f:
+        json.dump(result["cam"].to_dict(), f, indent=2)
+    print(f"Saved intrinsics to {out_path}")

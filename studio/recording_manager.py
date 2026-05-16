@@ -16,8 +16,9 @@ from pathlib import Path
 
 from studio.recording_metadata import CameraRecordingInfo, RecordingMetadata, SyncMetadata
 
-RECORDING_BASE = Path.home() / "Documents" / "clutch" / "clutch_db"
-CATALOG_DIR    = RECORDING_BASE / "catalog"
+_DB_ROOT       = Path.home() / "Documents" / "clutch" / "clutch_db"
+RECORDING_BASE = _DB_ROOT / "recordings"
+CATALOG_DIR    = _DB_ROOT / "catalog"
 QUEUE_MAXSIZE  = 120
 
 log = logging.getLogger("recording_manager")

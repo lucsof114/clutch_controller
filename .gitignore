@@ -33,3 +33,6 @@ Thumbs.db
 scrap/
 first/
 $(ALLUSERSPROFILE)/
+
+# SDK logs
+MvSdkLog/
