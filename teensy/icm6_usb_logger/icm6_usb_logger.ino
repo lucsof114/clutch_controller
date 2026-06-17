@@ -80,17 +80,17 @@ static SPISettings ICM_SPI(1000000, MSBFIRST, SPI_MODE3);        // raise to 8-1
 // ---- 6-IMU table (CS pin, INT1 pin) ----
 struct ImuConfig { uint8_t cs; uint8_t intPin; };
 static const ImuConfig IMUS[] = {
-  {10, 9},   // TEMP single-chip bench test (wired IMU); restore 6-table after
+  {8, 2}, {3, 9}, {4, 10},   // 3 IMUs wired (CS, INT1) per CS-scan; add more for full 6
 };
 static constexpr uint8_t MAX_IMUS = 6;
 static constexpr uint8_t NUM_IMUS = sizeof(IMUS) / sizeof(IMUS[0]);
 static_assert(NUM_IMUS <= MAX_IMUS, "increase MAX_IMUS / ISR_TABLE");
-static constexpr uint8_t PIN_SYNC = 17;
+static constexpr uint8_t PIN_SYNC = 32;   // hardware camera-sync edge from the Arduino
 
 // --- BENCH TEST ONLY: Teensy fakes the 30 Hz camera edge on PIN_SYNC_GEN.
-// Jumper PIN_SYNC_GEN -> ICM INT2 (FSYNC) AND -> PIN_SYNC (17). For production,
-// set TEST_SYNC_GEN 0 and drive pin 17 + the FSYNC pins from the real camera trigger.
-#define TEST_SYNC_GEN 1
+// Jumper PIN_SYNC_GEN -> ICM INT2 (FSYNC) AND -> PIN_SYNC. For production,
+// set TEST_SYNC_GEN 0 and drive PIN_SYNC + the FSYNC pins from the real camera trigger.
+#define TEST_SYNC_GEN 0
 static constexpr uint8_t PIN_SYNC_GEN = 5;
 #if TEST_SYNC_GEN
 IntervalTimer syncGen;
@@ -400,12 +400,13 @@ void setup() {
   while (!Serial && millis() - t0 < 3000) {}
   enableCycleCounter();
 
-  for (uint8_t i = 0; i < NUM_IMUS; i++) { pinMode(IMUS[i].cs, OUTPUT); digitalWriteFast(IMUS[i].cs, HIGH); }
-  pinMode(PIN_SYNC, INPUT);
-#if TEST_SYNC_GEN
-  pinMode(PIN_SYNC_GEN, OUTPUT); digitalWriteFast(PIN_SYNC_GEN, LOW);
-#endif
+  // Drive every non-SPI pin to a defined level, then bring up SPI exactly ONCE and let
+  // it settle before any transaction. Floating inputs next to SCK/MISO on a breadboard,
+  // and (critically) re-calling SPI.begin() after pins are configured, both corrupt the
+  // first reads — that was the "WHO_AM_I reads 0x44" bug. One clean SPI.begin + settle.
+  for (uint8_t p = 0; p <= 23; p++) { if (p == 11 || p == 12 || p == 13) continue; pinMode(p, OUTPUT); digitalWriteFast(p, HIGH); }
   SPI.begin();
+  delay(50);
 
   uint8_t present = 0;
   for (uint8_t i = 0; i < NUM_IMUS; i++) {
@@ -413,6 +414,7 @@ void setup() {
     if (imuState[i].present) { pinMode(IMUS[i].intPin, INPUT); present++; }
     else { Serial.print("# IMU "); Serial.print(i); Serial.println(" not responding (WHO_AM_I)"); }
   }
+  pinMode(PIN_SYNC, INPUT);   // restore the sync pin as an input (Arduino drives the edge)
 #if defined(__IMXRT1062__)
   NVIC_SET_PRIORITY(IRQ_GPIO6789, 16);
 #endif
