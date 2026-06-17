@@ -15,6 +15,7 @@ import time
 
 from studio.arduino_controller.client import TriggerController
 from studio.camera_manager import CameraManager
+from studio.imu_controller import ImuController
 import numpy as np
 
 from studio.pico_controller import PicoController, PicoResult
@@ -30,6 +31,8 @@ class StudioController:
         self._trigger = TriggerController()
         self._pico = PicoController()
         self._recording_manager = RecordingManager()
+        self._imu = ImuController()
+        self._imu_active = False
         self._lock = threading.Lock()
         self._recording = False
         self._frequency_hz: float = 0.0
@@ -142,7 +145,24 @@ class StudioController:
                 self._rollback_start(camera_ids, pico=False, recording=True)
                 raise
 
-            # 7. Start Arduino trigger
+            # 6.5 Start the IMU Teensy logger (auto-detected) BEFORE the Arduino.
+            #     'g' must land while the sync is OFF so the first logged edge is
+            #     seq 0, aligned with camera frame 0. No Teensy → camera-only path
+            #     (recording proceeds unchanged).
+            self._imu_active = False
+            try:
+                if self._imu.available():
+                    imu_path = self._recording_manager.recording_base / recording_id / "imu.bin"
+                    if self._imu.start(imu_path):
+                        self._imu_active = True
+                        log.info("IMU Teensy logging -> %s", imu_path)
+                    else:
+                        log.warning("IMU Teensy present but failed to start; recording camera-only")
+            except Exception as e:
+                log.warning("IMU start error (%s); recording camera-only", e)
+
+            # 7. Start Arduino trigger (LAST — its first edge is the shared anchor that
+            #    fans to cameras, PicoScope, and the IMU FSYNC pins)
             try:
                 log.info("Starting Arduino at %.1f Hz", frequency_hz)
                 ok = self._trigger.start(frequency_hz)
@@ -150,6 +170,7 @@ class StudioController:
                 if not ok:
                     raise RuntimeError("Arduino start returned failure")
             except Exception:
+                self._stop_imu_safe()
                 self._rollback_start(camera_ids, pico=True, recording=True)
                 raise
 
@@ -186,6 +207,15 @@ class StudioController:
                 warnings.append(f"Arduino stop error: {e}")
 
             time.sleep(0.4)
+
+            # 1.5 Stop the IMU Teensy AFTER the Arduino (so the final edge and its
+            #     FSYNC tag are captured). Finalises imu.bin into the recording dir;
+            #     any FIFO discontinuity marks the IMU capture invalid.
+            imu_stats = self._stop_imu_safe()
+            if imu_stats and not imu_stats.get("valid", True):
+                warnings.append(
+                    f"IMU recording INVALID (discontinuities="
+                    f"{imu_stats.get('discontinuities', 0)})")
 
             # 2. Stop PicoScope — all real edges are now accounted for
             pico_result: PicoResult | None = None
@@ -230,6 +260,9 @@ class StudioController:
                     "sync_count": sync_meta.sync_count,
                 }
 
+            if imu_stats:
+                result["imu"] = imu_stats
+
             if warnings:
                 result["warnings"] = warnings
                 log.warning("Studio stop warnings: %s", warnings)
@@ -252,6 +285,8 @@ class StudioController:
             "arduino": arduino_status,
             "pico_open": self._pico.is_open,
             "pico_tracking": self._pico.is_tracking,
+            "imu_present": self._imu.available(),
+            "imu_recording": self._imu_active,
             "recording": self._recording,
             "frequency_hz": self._frequency_hz if self._recording else None,
             "camera_ids": self._camera_ids if self._recording else [],
@@ -321,6 +356,18 @@ class StudioController:
 
         if errors:
             raise RuntimeError("; ".join(errors))
+
+    def _stop_imu_safe(self) -> dict:
+        """Stop the IMU Teensy if it is logging; never raises. Returns its stats."""
+        if not self._imu_active:
+            return {}
+        try:
+            stats = self._imu.stop()
+        except Exception as e:
+            log.warning("IMU stop error: %s", e)
+            stats = {"valid": False, "error": str(e)}
+        self._imu_active = False
+        return stats
 
     def _ensure_sync_stopped(self):
         """Send STOP to Arduino, verify it's not running."""
