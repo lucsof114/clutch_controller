@@ -36,3 +36,6 @@ $(ALLUSERSPROFILE)/
 
 # SDK logs
 MvSdkLog/
+
+# IDE artifacts
+.theia/
