@@ -37,6 +37,9 @@ class StudioController:
         self._recording = False
         self._frequency_hz: float = 0.0
         self._camera_ids: list[str] = []
+        # Persistent per-camera labels (keyed by serial == camera_id), e.g. "headmounted".
+        self._labels_path = self._recording_manager.recording_base.parent / "camera_labels.json"
+        self._camera_labels: dict[str, str] = self._load_labels()
 
     # ── Connection lifecycle ─────────────────────────────────────────────────
 
@@ -121,6 +124,7 @@ class StudioController:
                     ip=cam.ip,
                     model=cam.model,
                     serial=cam.serial,
+                    label=self._camera_labels.get(cam.serial, ""),
                     parameters=CameraParameters(
                         exposure_us=raw["ExposureTime"]["current"],
                         gain_db=raw["Gain"]["current"],
@@ -356,6 +360,46 @@ class StudioController:
 
         if errors:
             raise RuntimeError("; ".join(errors))
+
+    # ── Camera labels ────────────────────────────────────────────────────────
+    def _load_labels(self) -> dict:
+        try:
+            if self._labels_path.exists():
+                return json.loads(self._labels_path.read_text())
+        except Exception as e:
+            log.warning("Failed to load camera labels: %s", e)
+        return {}
+
+    def _save_labels(self):
+        try:
+            self._labels_path.parent.mkdir(parents=True, exist_ok=True)
+            self._labels_path.write_text(json.dumps(self._camera_labels, indent=2))
+        except Exception as e:
+            log.warning("Failed to save camera labels: %s", e)
+
+    def _serial_for(self, camera_id: str) -> str:
+        """camera_id is the serial in this system; resolve via the camera if possible."""
+        try:
+            return self._cam_mgr.get_camera(camera_id).serial
+        except Exception:
+            return camera_id
+
+    def set_camera_label(self, camera_id: str, label: str) -> str:
+        """Set (or clear, if blank) a persistent label for a camera. Returns the label."""
+        serial = self._serial_for(camera_id)
+        label = (label or "").strip()
+        if label:
+            self._camera_labels[serial] = label
+        else:
+            self._camera_labels.pop(serial, None)
+        self._save_labels()
+        return label
+
+    def get_camera_label(self, camera_id: str) -> str:
+        return self._camera_labels.get(self._serial_for(camera_id), "")
+
+    def labels_by_serial(self) -> dict:
+        return dict(self._camera_labels)
 
     def _stop_imu_safe(self) -> dict:
         """Stop the IMU Teensy if it is logging; never raises. Returns its stats."""

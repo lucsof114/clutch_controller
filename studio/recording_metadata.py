@@ -28,6 +28,7 @@ class CameraRecordingInfo:
     ip: str
     model: str
     serial: str
+    label: str = ""                    # user label e.g. "headmounted" (persisted per serial)
     frame_count: int = 0
     total_size_bytes: int = 0
     parameters: CameraParameters = field(default_factory=CameraParameters)

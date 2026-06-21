@@ -35,7 +35,21 @@ def index():
 def list_cameras():
     if request.args.get("discover") == "true":
         studio._cam_mgr.discover()
-    return jsonify(studio._cam_mgr.list_cameras())
+    cams = studio._cam_mgr.list_cameras()
+    labels = studio.labels_by_serial()
+    for c in cams:
+        c["label"] = labels.get(c.get("serial", ""), "")
+    return jsonify(cams)
+
+
+@app.route("/api/cameras/<camera_id>/label", methods=["POST"])
+def set_camera_label(camera_id):
+    data = request.get_json(silent=True) or {}
+    try:
+        label = studio.set_camera_label(camera_id, data.get("label", ""))
+        return jsonify({"ok": True, "label": label})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
 
 
 @app.route("/api/cameras/<camera_id>/open", methods=["POST"])

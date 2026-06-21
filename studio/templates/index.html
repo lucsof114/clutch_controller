@@ -199,6 +199,9 @@ header {
 }
 .cam-id { font-family: var(--font-mono); font-size: 12px; font-weight: 600; color: #fff; }
 .cam-sub { font-size: 10px; color: rgba(255,255,255,0.45); margin-top: 2px; }
+.cam-label { display: inline-block; font-size: 10px; margin-top: 3px; padding: 1px 6px; border-radius: 8px;
+  background: rgba(255,255,255,0.08); color: rgba(255,255,255,0.7); cursor: pointer; user-select: none; }
+.cam-label:hover { background: rgba(255,255,255,0.16); color: #fff; }
 .status-dot { width: 7px; height: 7px; border-radius: 50%; margin-top: 4px; background: var(--text3); }
 .status-dot.grabbing { background: var(--green); box-shadow: 0 0 5px var(--green); }
 .status-dot.open { background: var(--amber); }
@@ -551,6 +554,7 @@ function renderCard(cid) {
         <div>
           <div class="cam-id">${cam.serial}</div>
           <div class="cam-sub">${cam.model} &middot; ${cam.ip}</div>
+          <div class="cam-label" id="lbl-${id}" onclick="setLabel('${cid}')" title="Click to set a label (saved to recording metadata)">${cam.label ? '🏷 ' + cam.label : '+ add label'}</div>
         </div>
         <div class="status-dot ${dotCls}" id="dot-${id}"></div>
       </div>
@@ -584,6 +588,18 @@ function renderCard(cid) {
   const existing = document.getElementById('card-' + id);
   if (existing) existing.replaceWith(card);
   else document.getElementById('grid').appendChild(card);
+}
+
+// ── Camera label ────────────────────────────────────────────────────────────
+async function setLabel(cid) {
+  const cur = (cameras[cid] && cameras[cid].label) || '';
+  const v = prompt('Label for this camera (e.g. "headmounted"). Leave blank to clear:', cur);
+  if (v === null) return;                       // cancelled
+  const r = await api(`/api/cameras/${cid}/label`, 'POST', { label: v });
+  if (r && r.ok) {
+    if (cameras[cid]) cameras[cid].label = r.label;
+    renderCard(cid);
+  }
 }
 
 function playIcon(cid, cam) {

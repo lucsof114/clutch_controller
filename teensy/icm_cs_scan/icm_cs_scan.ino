@@ -29,11 +29,19 @@ void setup() {
 
 void loop() {
   Serial.println("# CS scan for ICM-42605 (WHO_AM_I should read 0x42):");
+  // Idle-bus probe: clock 8 bits with NO CS asserted. 0x00 => MISO shorted to GND;
+  // 0xFF => floating / no drive (power issue). Reads it twice.
+  SPI.beginTransaction(CFG);
+  uint8_t idle1 = SPI.transfer(0x00), idle2 = SPI.transfer(0x00);
+  SPI.endTransaction();
+  Serial.print("  MISO idle (no CS): 0x"); Serial.print(idle1, HEX); Serial.print(" 0x"); Serial.print(idle2, HEX);
+  Serial.println(idle1 == 0x00 ? "  => MISO held LOW (short to GND?)" : idle1 == 0xFF ? "  => floating/no drive (power?)" : "");
   uint8_t found = 0;
   for (uint8_t i = 0; i < sizeof(PINS); i++) {
     uint8_t cs = PINS[i];
     uint8_t v = readWho(cs);
     if (v == WHOAMI) { Serial.print("  CS "); Serial.print(cs); Serial.print(" -> 0x42  *** ICM FOUND ***"); Serial.println(); found++; }
+    else if (cs >= 2 && cs <= 7) { Serial.print("  CS "); Serial.print(cs); Serial.print(" -> 0x"); Serial.print(v, HEX); Serial.println(v == 0x00 ? " (MISO low)" : v == 0xFF ? " (bus idle / no MISO drive)" : ""); }
     else if (v != 0x00 && v != 0xFF) { Serial.print("  CS "); Serial.print(cs); Serial.print(" -> 0x"); Serial.println(v, HEX); }
   }
   Serial.print("# total ICM found: "); Serial.println(found);

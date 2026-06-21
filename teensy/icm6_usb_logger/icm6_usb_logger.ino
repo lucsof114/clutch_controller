@@ -75,12 +75,12 @@ static constexpr uint32_t CYC_PER_US = F_CPU_ACTUAL / 1000000;   // 600
 static constexpr uint8_t  PKT = 16;                              // FIFO packet size
 static constexpr uint16_t FIFO_WM_BYTES = 128;                   // watermark = 8 packets
 
-static SPISettings ICM_SPI(1000000, MSBFIRST, SPI_MODE3);        // raise to 8-12 MHz with caps
+static SPISettings ICM_SPI(250000, MSBFIRST, SPI_MODE3);        // 250 kHz — robust against long breadboard wires
 
 // ---- 6-IMU table (CS pin, INT1 pin) ----
 struct ImuConfig { uint8_t cs; uint8_t intPin; };
 static const ImuConfig IMUS[] = {
-  {8, 2}, {3, 9}, {4, 10},   // 3 IMUs wired (CS, INT1) per CS-scan; add more for full 6
+  {4, 10}, {2, 8}, {3, 9},   // REORDER TEST: CS4 configured FIRST
 };
 static constexpr uint8_t MAX_IMUS = 6;
 static constexpr uint8_t NUM_IMUS = sizeof(IMUS) / sizeof(IMUS[0]);
